@@ -1,0 +1,117 @@
+name: Run Scraper (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Tryb: full | kierunki | grupy | grupy_zajecia | teachers"
+        required: false
+        default: "full"
+      verbose:
+        description: "Wypisz dodatkowe informacje (logger DEBUG)"
+        required: false
+        default: "false"
+      dry_run:
+        description: "Nie zapisuj do bazy (NA PRZYSZŁOŚĆ)"
+        required: false
+        default: "false"
+      scraper_external_ids:
+        description: "(opcjonalnie) Lista external ID nauczycieli, np. 34660,30172"
+        required: false
+        default: ""
+      teachers_batch_size:
+        description: "(opcjonalnie) Batch dla zapisu zajęć nauczycieli (domyślnie w kodzie)"
+        required: false
+        default: ""
+
+# schedule (opcjonalnie) – odkomentuj jeśli chcesz cykliczne uruchomienia
+# schedule:
+#   - cron: '0 3 * * *'  # codziennie 03:00 UTC
+
+jobs:
+  scrape:
+    name: Uruchom scraper
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: scraper-manual
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ustaw Pythona
+        uses: actions/setup-python@v5
+        with:
+            python-version: '3.11'
+            cache: 'pip'
+            cache-dependency-path: scraper/requirements.txt
+
+      - name: Instalacja zależności
+        run: |
+          pip install --upgrade pip
+          pip install -r scraper/requirements.txt
+
+      - name: Weryfikacja zmiennych środowiskowych
+        run: |
+          test -n "${SUPABASE_URL}" || (echo 'Brak SUPABASE_URL' && exit 1)
+          test -n "${SUPABASE_SERVICE_ROLE_KEY}" || (echo 'Brak SUPABASE_SERVICE_ROLE_KEY' && exit 1)
+          echo "✔ Zmienne środowiskowe obecne"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: Uruchom scraper (tryb ${{ github.event.inputs.mode }})
+        id: run_scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VERBOSE: ${{ github.event.inputs.verbose }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          REQ_MODE: ${{ github.event.inputs.mode }}
+          RAW_EXTERNAL_IDS: ${{ github.event.inputs.scraper_external_ids }}
+          RAW_TEACHERS_BATCH: ${{ github.event.inputs.teachers_batch_size }}
+        run: |
+          set -e
+          echo "== Start ==" | tee scraper_run.log
+          echo "Wybrany tryb: ${REQ_MODE}" | tee -a scraper_run.log
+
+          # Mapowanie trybu na zmienną SCRAPER_ONLY
+          if [ "${REQ_MODE}" != "full" ] && [ -n "${REQ_MODE}" ]; then
+            export SCRAPER_ONLY="${REQ_MODE}"
+            echo "SCRAPER_ONLY=${SCRAPER_ONLY}" | tee -a scraper_run.log
+          else
+            echo "Pełny pipeline (brak SCRAPER_ONLY)" | tee -a scraper_run.log
+          fi
+
+          if [ -n "${RAW_EXTERNAL_IDS}" ]; then
+            export SCRAPER_EXTERNAL_IDS="${RAW_EXTERNAL_IDS}"
+            echo "SCRAPER_EXTERNAL_IDS=${SCRAPER_EXTERNAL_IDS}" >> scraper_run.log
+          fi
+          if [ -n "${RAW_TEACHERS_BATCH}" ]; then
+            export TEACHERS_BATCH_SIZE="${RAW_TEACHERS_BATCH}"
+            echo "TEACHERS_BATCH_SIZE=${TEACHERS_BATCH_SIZE}" >> scraper_run.log
+          fi
+
+          # (opcjonalnie) verbose logging placeholder
+          if [ "${VERBOSE}" = "true" ]; then
+            echo "Tryb verbose aktywny (TODO: integracja loggera)." | tee -a scraper_run.log
+          fi
+
+          # Uruchomienie główne
+          python -m scraper.main 2>&1 | tee -a scraper_run.log
+          echo "== Koniec ==" | tee -a scraper_run.log
+
+      - name: Artefakt logów
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scraper-logs
+          path: scraper_run.log
+          retention-days: 7
+
+      - name: Krótki podsumowujący log
+        if: always()
+        run: |
+          echo "Run zakończony statusem: ${{ job.status }}"
