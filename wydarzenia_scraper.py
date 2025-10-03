@@ -101,3 +101,11 @@ def parse_events(html):
             "image": image
         })
     return events
+if __name__ == "__main__":
+    import requests
+    html = requests.get(URL).text
+    events = parse_events(html)
+    if not events:
+        print("Brak wydarzeń dla studentów.")
+    for event in events:
+        print(event)
