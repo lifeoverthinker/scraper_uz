@@ -1,0 +1,36 @@
+name: Aktualizuj Wydarzenia UZ
+
+on:
+  schedule:
+    # Uruchamiaj codziennie o 6:00 rano (czasu UTC)
+    - cron: '0 6 * * *'
+  workflow_dispatch: # Pozwala uruchomić ręcznie przyciskiem "Run workflow"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pobierz kod repozytorium
+        uses: actions/checkout@v3
+
+      - name: Skonfiguruj Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Zainstaluj biblioteki
+        run: |
+          pip install -r requirements.txt
+
+      - name: Uruchom scraper
+        run: python save_events_to_json.py
+
+      - name: Zapisz zmiany (commit events.json)
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "Automatyczna aktualizacja events.json"
+          file_pattern: events.json
