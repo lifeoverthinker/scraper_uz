@@ -28,15 +28,11 @@ def get_text_after_label(item, label_text):
     return ""
 
 
-def parse_events():
-    try:
-        response = requests.get(URL)
-        response.raise_for_status()
-        html = response.text
-    except Exception as e:
-        print(f"Błąd pobierania strony: {e}")
-        return []
-
+def parse_events(html):
+    """
+    Parsuje kod HTML strony kalendarza i zwraca listę słowników z wydarzeniami.
+    Przyjmuje treść HTML jako argument (pobrany wcześniej w save_events_to_json.py).
+    """
     soup = BeautifulSoup(html, "html.parser")
     events = []
 
@@ -67,25 +63,23 @@ def parse_events():
                 month_name = clean_text(month_tag.text).lower()
                 month_num = MONTHS_MAP.get(month_name, current_date.month)
 
-                # Prosta logika roku: jeśli miesiąc wydarzenia jest mniejszy niż aktualny (np. jest grudzień, a wydarzenie w styczniu),
-                # to zakładamy następny rok. W przeciwnym razie bieżący.
+                # Logika roku: jeśli miesiąc < aktualny - 1, to zakładamy przyszły rok
                 year = current_date.year
-                if month_num < current_date.month - 1:  # Margines błędu
+                if month_num < current_date.month - 1:
                     year += 1
 
                 try:
                     event_date_obj = datetime(year, month_num, int(day))
-                    date_iso = event_date_obj.strftime("%Y-%m-%d")  # Format do bazy danych (sortowanie)
+                    date_iso = event_date_obj.strftime("%Y-%m-%d")  # Format do sortowania
                     display_date = event_date_obj.strftime("%d.%m.%Y")  # Format do wyświetlania
                 except ValueError:
                     pass
 
-            # Jeśli data nie została ustalona z boxa, próbujemy z pola tekstowego "Data:"
+            # Jeśli data nie z boxa, to z tekstu
             if not event_date_obj:
                 date_text = get_text_after_label(item, "Data:")
                 if date_text:
-                    display_date = date_text  # Tutaj może być zakres np. "24.10 - 05.12.2025"
-                    # Próba wyciągnięcia pierwszej daty do sortowania
+                    display_date = date_text
                     match = re.search(r'(\d{1,2})\.(\d{1,2})\.(\d{4})', date_text)
                     if match:
                         d, m, y = match.groups()
@@ -102,7 +96,7 @@ def parse_events():
             # 3. Godzina
             time_info = get_text_after_label(item, "Godzina:")
             if time_info:
-                time_info = time_info.replace("-", "–").strip()  # Ujednolicenie myślnika
+                time_info = time_info.replace("-", "–").strip()
 
             # 4. Lokalizacja
             location = get_text_after_label(item, "Miejsce wydarzenia:")
@@ -110,8 +104,7 @@ def parse_events():
             # 5. Organizator
             organizer = get_text_after_label(item, "Organizator:")
 
-            # 6. Cena / Wstęp / Opis
-            # Ponieważ lista nie ma pełnego opisu, budujemy go z ceny i kategorii
+            # 6. Cena / Opis
             price = get_text_after_label(item, "Cena wejścia:")
             if not price:
                 full_text = item.get_text().lower()
@@ -132,26 +125,18 @@ def parse_events():
 
             events.append({
                 "title": title,
-                "date_iso": date_iso,  # Do sortowania: "2025-12-04"
-                "display_date": display_date,  # Do wyświetlania: "04.12.2025"
+                "date_iso": date_iso,
+                "display_date": display_date,
                 "time": time_info,
                 "location": location,
-                "description": price,  # Używamy ceny jako krótkiego opisu w liście
+                "description": price,
                 "organizer": organizer,
                 "image_url": image_url,
                 "link": link
             })
 
         except Exception as e:
-            print(f"Błąd przetwarzania wydarzenia: {e}")
+            print(f"Błąd przetwarzania: {e}")
             continue
 
     return events
-
-
-if __name__ == "__main__":
-    import json
-
-    data = parse_events()
-    # Wypisujemy JSON na standardowe wyjście, aby Android/Server mógł to odebrać
-    print(json.dumps(data, ensure_ascii=False, indent=4))
