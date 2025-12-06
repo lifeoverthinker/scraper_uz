@@ -3,7 +3,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import re
 
-URL = "https://uz.zgora.pl/kalendarz"
+# ZMIANA: Link tylko do wydarzeń dla studentów
+URL = "https://uz.zgora.pl/kalendarz/filtr,studenci,1.html"
 BASE_URL = "https://uz.zgora.pl"
 
 # Mapa polskich miesięcy na numery
@@ -31,7 +32,7 @@ def get_text_after_label(item, label_text):
 def parse_events(html):
     """
     Parsuje kod HTML strony kalendarza i zwraca listę słowników z wydarzeniami.
-    Przyjmuje treść HTML jako argument (pobrany wcześniej w save_events_to_json.py).
+    Przyjmuje treść HTML jako argument.
     """
     soup = BeautifulSoup(html, "html.parser")
     events = []
@@ -50,7 +51,7 @@ def parse_events(html):
             if not link.startswith("http"):
                 link = BASE_URL + link
 
-            # 2. Data (Logika: Najpierw box boczny, potem tekst 'Data:')
+            # 2. Data
             day_tag = item.select_one(".date-cont .day")
             month_tag = item.select_one(".date-cont .month")
 
@@ -63,19 +64,17 @@ def parse_events(html):
                 month_name = clean_text(month_tag.text).lower()
                 month_num = MONTHS_MAP.get(month_name, current_date.month)
 
-                # Logika roku: jeśli miesiąc < aktualny - 1, to zakładamy przyszły rok
                 year = current_date.year
                 if month_num < current_date.month - 1:
                     year += 1
 
                 try:
                     event_date_obj = datetime(year, month_num, int(day))
-                    date_iso = event_date_obj.strftime("%Y-%m-%d")  # Format do sortowania
-                    display_date = event_date_obj.strftime("%d.%m.%Y")  # Format do wyświetlania
+                    date_iso = event_date_obj.strftime("%Y-%m-%d")
+                    display_date = event_date_obj.strftime("%d.%m.%Y")
                 except ValueError:
                     pass
 
-            # Jeśli data nie z boxa, to z tekstu
             if not event_date_obj:
                 date_text = get_text_after_label(item, "Data:")
                 if date_text:
@@ -89,22 +88,17 @@ def parse_events(html):
                         except:
                             pass
 
-            # Pomijanie wydarzeń przeszłych
             if event_date_obj and event_date_obj.date() < current_date.date():
                 continue
 
-            # 3. Godzina
+            # 3. Reszta pól
             time_info = get_text_after_label(item, "Godzina:")
             if time_info:
                 time_info = time_info.replace("-", "–").strip()
 
-            # 4. Lokalizacja
             location = get_text_after_label(item, "Miejsce wydarzenia:")
-
-            # 5. Organizator
             organizer = get_text_after_label(item, "Organizator:")
 
-            # 6. Cena / Opis
             price = get_text_after_label(item, "Cena wejścia:")
             if not price:
                 full_text = item.get_text().lower()
@@ -113,7 +107,6 @@ def parse_events(html):
                 else:
                     price = "Informacje u organizatora"
 
-            # 7. Obrazek
             img_tag = item.select_one("img")
             image_url = ""
             if img_tag and img_tag.get("src"):
