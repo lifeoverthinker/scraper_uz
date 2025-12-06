@@ -3,11 +3,9 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import re
 
-# ZMIANA: Link tylko do wydarzeń dla studentów
 URL = "https://uz.zgora.pl/kalendarz/filtr,studenci,1.html"
 BASE_URL = "https://uz.zgora.pl"
 
-# Mapa polskich miesięcy na numery
 MONTHS_MAP = {
     "styczeń": 1, "luty": 2, "marzec": 3, "kwiecień": 4, "maj": 5, "czerwiec": 6,
     "lipiec": 7, "sierpień": 8, "wrzesień": 9, "październik": 10, "listopad": 11, "grudzień": 12
@@ -15,14 +13,11 @@ MONTHS_MAP = {
 
 
 def clean_text(text):
-    """Usuwa zbędne białe znaki i nową linię."""
-    if not text:
-        return ""
+    if not text: return ""
     return " ".join(text.split())
 
 
 def get_text_after_label(item, label_text):
-    """Pobiera tekst znajdujący się bezpośrednio po pogrubionej etykiecie (np. 'Data:')."""
     label_tag = item.find("b", string=re.compile(label_text))
     if label_tag and label_tag.next_sibling:
         return clean_text(label_tag.next_sibling)
@@ -30,28 +25,19 @@ def get_text_after_label(item, label_text):
 
 
 def parse_events(html):
-    """
-    Parsuje kod HTML strony kalendarza i zwraca listę słowników z wydarzeniami.
-    Przyjmuje treść HTML jako argument.
-    """
     soup = BeautifulSoup(html, "html.parser")
     events = []
-
     current_date = datetime.now()
 
     for item in soup.select(".calendar-list-item"):
         try:
-            # 1. Tytuł i Link
             title_tag = item.select_one(".h4 a.title")
-            if not title_tag:
-                continue
+            if not title_tag: continue
 
             title = clean_text(title_tag.text)
             link = title_tag["href"]
-            if not link.startswith("http"):
-                link = BASE_URL + link
+            if not link.startswith("http"): link = BASE_URL + link
 
-            # 2. Data
             day_tag = item.select_one(".date-cont .day")
             month_tag = item.select_one(".date-cont .month")
 
@@ -63,11 +49,8 @@ def parse_events(html):
                 day = clean_text(day_tag.text)
                 month_name = clean_text(month_tag.text).lower()
                 month_num = MONTHS_MAP.get(month_name, current_date.month)
-
                 year = current_date.year
-                if month_num < current_date.month - 1:
-                    year += 1
-
+                if month_num < current_date.month - 1: year += 1
                 try:
                     event_date_obj = datetime(year, month_num, int(day))
                     date_iso = event_date_obj.strftime("%Y-%m-%d")
@@ -88,13 +71,10 @@ def parse_events(html):
                         except:
                             pass
 
-            if event_date_obj and event_date_obj.date() < current_date.date():
-                continue
+            if event_date_obj and event_date_obj.date() < current_date.date(): continue
 
-            # 3. Reszta pól
             time_info = get_text_after_label(item, "Godzina:")
-            if time_info:
-                time_info = time_info.replace("-", "–").strip()
+            if time_info: time_info = time_info.replace("-", "–").strip()
 
             location = get_text_after_label(item, "Miejsce wydarzenia:")
             organizer = get_text_after_label(item, "Organizator:")
@@ -107,14 +87,7 @@ def parse_events(html):
                 else:
                     price = "Informacje u organizatora"
 
-            img_tag = item.select_one("img")
-            image_url = ""
-            if img_tag and img_tag.get("src"):
-                src = img_tag["src"]
-                if not src.startswith("http"):
-                    image_url = BASE_URL + src
-                else:
-                    image_url = src
+            # Bez obrazków!
 
             events.append({
                 "title": title,
@@ -124,7 +97,6 @@ def parse_events(html):
                 "location": location,
                 "description": price,
                 "organizer": organizer,
-                "image_url": image_url,
                 "link": link
             })
 
