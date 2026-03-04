@@ -7,3 +7,6 @@ supabase
 icalendar
 tqdm
 aiohttp
+lxml
+python-dateutil
+rapidfuzz

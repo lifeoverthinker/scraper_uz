@@ -1,61 +1,40 @@
-﻿name: Run Scraper
+name: Run Scraper (manual + cron)
 
 on:
-  schedule:
-    # Co 4h: odswiezaj zajecia grup i nauczycieli (w tle)
-    - cron: "20 */4 * * *"
   workflow_dispatch:
     inputs:
       mode:
-        description: "Tryb uruchomienia"
-        required: true
-        default: "events_all"
-        type: choice
-        options:
-          - events_all
-          - full
-          - kierunki
-          - grupy
-          - grupy_zajecia
-          - teachers
-      xml_first:
-        description: "Preferuj XML dla katalogu"
+        description: "Tryb: full | xml_bootstrap | xml_sync | teacher_sync | cleanup_only | kierunki | grupy | grupy_zajecia | teachers"
         required: false
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
-      events_xml_first:
-        description: "Preferuj XML dla eventow"
-        required: false
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
+        default: "xml_sync"
       verbose:
-        description: "Dodatkowe logi"
+        description: "Wypisz dodatkowe informacje (logger DEBUG)"
         required: false
         default: "false"
       dry_run:
-        description: "Placeholder (brak zapisu)"
+        description: "Nie zapisuj do bazy (placeholder)"
         required: false
         default: "false"
       scraper_external_ids:
-        description: "Opcjonalnie: lista external ID nauczycieli, np. 34660,30172"
+        description: "(opcjonalnie) Lista external ID nauczycieli, np. 34660,30172"
         required: false
         default: ""
       teachers_batch_size:
-        description: "Opcjonalnie: batch dla zajec nauczycieli"
+        description: "(opcjonalnie) Batch dla zapisu zajęć nauczycieli (domyślnie w kodzie)"
         required: false
         default: ""
+
+  schedule:
+    - cron: "5 1 * * *"
+    - cron: "20 1 * * *"
+    - cron: "40 1 * * *"
+    - cron: "10 2 * * *"
 
 jobs:
   scrape:
     name: Uruchom scraper
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     concurrency:
       group: scraper-manual
       cancel-in-progress: false
@@ -71,48 +50,63 @@ jobs:
           cache: "pip"
           cache-dependency-path: scraper/requirements.txt
 
-      - name: Instalacja zaleznosci
+      - name: Instalacja zależności
         run: |
           pip install --upgrade pip
           pip install -r scraper/requirements.txt
 
-      - name: Weryfikacja zmiennych srodowiskowych
+      - name: Weryfikacja zmiennych środowiskowych
         run: |
           test -n "${SUPABASE_URL}" || (echo 'Brak SUPABASE_URL' && exit 1)
           test -n "${SUPABASE_SERVICE_ROLE_KEY}" || (echo 'Brak SUPABASE_SERVICE_ROLE_KEY' && exit 1)
-          echo "OK: secrets obecne"
+          echo "✔ Zmienne środowiskowe obecne"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      - name: Uruchom scraper
+      - name: Ustal tryb (manual lub cron)
+        id: mode
+        shell: bash
+        run: |
+          set -e
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            FINAL_MODE="${{ github.event.inputs.mode }}"
+          else
+            CRON_EXPR="${{ github.event.schedule }}"
+            case "${CRON_EXPR}" in
+              "5 1 * * *")  FINAL_MODE="xml_bootstrap" ;;
+              "20 1 * * *") FINAL_MODE="xml_sync" ;;
+              "40 1 * * *") FINAL_MODE="teacher_sync" ;;
+              "10 2 * * *") FINAL_MODE="cleanup_only" ;;
+              *) FINAL_MODE="xml_sync" ;;
+            esac
+          fi
+
+          echo "final_mode=${FINAL_MODE}" >> "$GITHUB_OUTPUT"
+          echo "Wybrany final_mode=${FINAL_MODE}"
+
+      - name: Uruchom scraper (tryb ${{ steps.mode.outputs.final_mode }})
         id: run_scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           VERBOSE: ${{ github.event.inputs.verbose }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
-          REQ_MODE: ${{ github.event.inputs.mode || 'events_all' }}
+          REQ_MODE: ${{ steps.mode.outputs.final_mode }}
           RAW_EXTERNAL_IDS: ${{ github.event.inputs.scraper_external_ids }}
           RAW_TEACHERS_BATCH: ${{ github.event.inputs.teachers_batch_size }}
-          XML_FIRST: ${{ github.event.inputs.xml_first || 'true' }}
-          EVENTS_XML_FIRST: ${{ github.event.inputs.events_xml_first || 'true' }}
         run: |
           set -e
           echo "== Start ==" | tee scraper_run.log
+          echo "Event: ${{ github.event_name }}" | tee -a scraper_run.log
           echo "Wybrany tryb: ${REQ_MODE}" | tee -a scraper_run.log
 
-          export SCRAPER_XML_FIRST=$([ "${XML_FIRST}" = "true" ] && echo "1" || echo "0")
-          export SCRAPER_EVENTS_XML_FIRST=$([ "${EVENTS_XML_FIRST}" = "true" ] && echo "1" || echo "0")
-          echo "SCRAPER_XML_FIRST=${SCRAPER_XML_FIRST}" | tee -a scraper_run.log
-          echo "SCRAPER_EVENTS_XML_FIRST=${SCRAPER_EVENTS_XML_FIRST}" | tee -a scraper_run.log
-
-          if [ "${REQ_MODE}" = "events_all" ]; then
-            MODES=("grupy_zajecia" "teachers")
-          elif [ "${REQ_MODE}" = "full" ] || [ -z "${REQ_MODE}" ]; then
-            MODES=("full")
+          if [ "${REQ_MODE}" != "full" ] && [ -n "${REQ_MODE}" ]; then
+            export SCRAPER_ONLY="${REQ_MODE}"
+            echo "SCRAPER_ONLY=${SCRAPER_ONLY}" | tee -a scraper_run.log
           else
-            MODES=("${REQ_MODE}")
+            echo "Pełny pipeline (brak SCRAPER_ONLY)" | tee -a scraper_run.log
           fi
 
           if [ -n "${RAW_EXTERNAL_IDS}" ]; then
@@ -126,25 +120,13 @@ jobs:
           fi
 
           if [ "${VERBOSE}" = "true" ]; then
-            echo "Tryb verbose aktywny." | tee -a scraper_run.log
+            echo "Tryb verbose aktywny (TODO: integracja loggera)." | tee -a scraper_run.log
           fi
 
-          for MODE in "${MODES[@]}"; do
-            echo "--- START MODE: ${MODE} ---" | tee -a scraper_run.log
-            if [ "${MODE}" = "full" ]; then
-              unset SCRAPER_ONLY
-              echo "Pelny pipeline (brak SCRAPER_ONLY)" | tee -a scraper_run.log
-            else
-              export SCRAPER_ONLY="${MODE}"
-              echo "SCRAPER_ONLY=${SCRAPER_ONLY}" | tee -a scraper_run.log
-            fi
-            python -m scraper.main 2>&1 | tee -a scraper_run.log
-            echo "--- END MODE: ${MODE} ---" | tee -a scraper_run.log
-          done
-
+          python -m scraper.main 2>&1 | tee -a scraper_run.log
           echo "== Koniec ==" | tee -a scraper_run.log
 
-      - name: Artefakt logow
+      - name: Artefakt logów
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -152,7 +134,7 @@ jobs:
           path: scraper_run.log
           retention-days: 7
 
-      - name: Podsumowanie
+      - name: Krótki podsumowujący log
         if: always()
         run: |
-          echo "Run zakonczony statusem: ${{ job.status }}"
+          echo "Run zakończony statusem: ${{ job.status }}"

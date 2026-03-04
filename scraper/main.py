@@ -1,98 +1,152 @@
+from __future__ import annotations
+
 import os
 import re
+import datetime as dt
 
 from scraper.scrapers.kierunki_scraper import scrape_kierunki
 from scraper.scrapers.grupy_scraper import scrape_grupy_for_kierunki
 from scraper.parsers.nauczyciel_parser import (
-    fetch_page,
-    parse_nauczyciel_details,
     parse_nauczyciele_from_group_page,
+    parse_nauczyciel_details,
+    fetch_page,
 )
 from scraper.db import (
-    get_uuid_map,
-    save_grupy,
     save_kierunki,
+    save_grupy,
     save_nauczyciele,
     save_zajecia_grupy,
     save_zajecia_nauczyciela,
+    get_uuid_map,
     supabase,
+    save_semester_state,
+    get_semester_state,
+    deactivate_expired_records,
 )
 from scraper.downloader import download_ics_for_groups_async
-from scraper.ics_updater import parse_ics_file, pobierz_plan_ics_nauczyciela
-from scraper.xml_source import (
-    fetch_grupy_plan_events_xml,
-    fetch_nauczyciel_plan_events_xml,
-    scrape_grupy_for_kierunki_xml,
-    scrape_kierunki_xml,
+from scraper.ics_updater import pobierz_plan_ics_nauczyciela, parse_ics_file
+
+from scraper.xml_client import XmlClient
+from scraper.semester_manager import (
+    parse_semester_state_from_meta,
+    detect_semester_switch,
+    SemesterState,
 )
-
-
-XML_FIRST = os.getenv("SCRAPER_XML_FIRST", "1") == "1"
-EVENTS_XML_FIRST = os.getenv("SCRAPER_EVENTS_XML_FIRST", "1") == "1"
-
-
-def _norm(value):
-    return (value or "").strip().casefold()
+from scraper.xml_sync import sync_directions_and_groups_from_xml
+from scraper.teacher_sync import sync_teacher_events_and_meta
 
 
 def _extract_external_id(link: str) -> str | None:
     if not link:
         return None
-    match = re.search(r"ID=(\d+)", link)
-    return match.group(1) if match else None
+    m = re.search(r"ID=(\d+)", link)
+    return m.group(1) if m else None
 
 
-def _load_kierunki():
-    if XML_FIRST:
-        kierunki_xml = scrape_kierunki_xml()
-        complete = [k for k in kierunki_xml if k.get("nazwa") and k.get("wydzial")]
-        if complete:
-            print(f"Kierunki z XML: {len(kierunki_xml)} (kompletnych: {len(complete)})")
-            return kierunki_xml
-        print("XML kierunkow pusty lub bez wydzialow - fallback do HTML")
+def _run_xml_bootstrap():
+    print("TRYB: xml_bootstrap (semestr + zapis stanu)")
 
-    kierunki_html = scrape_kierunki()
-    print(f"Kierunki z HTML: {len(kierunki_html)}")
-    return kierunki_html
+    client = XmlClient(
+        base_url=os.getenv("XML_BASE_URL", "https://plan.uz.zgora.pl/static_files/"),
+        timeout=int(os.getenv("XML_TIMEOUT", "20")),
+        max_retries=int(os.getenv("XML_MAX_RETRIES", "3")),
+    )
+
+    meta = client.fetch_semester_meta_from_file("grupy_lista_kierunkow.xml")
+    current_state = parse_semester_state_from_meta({
+        "current_semester_id": meta.current_semester_id,
+        "current_semester_name_pl": meta.current_semester_name_pl,
+        "current_semester_name_en": meta.current_semester_name_en,
+        "previous_semester_id": meta.previous_semester_id,
+        "previous_semester_name_pl": meta.previous_semester_name_pl,
+        "previous_semester_name_en": meta.previous_semester_name_en,
+        "generated_at": meta.generated_at,
+    })
+
+    prev_row = get_semester_state()
+    prev_state = None
+    if prev_row:
+        prev_state = SemesterState(
+            current_semester_id=prev_row.get("current_semester_id"),
+            current_semester_name=prev_row.get("current_semester_name"),
+            previous_semester_id=prev_row.get("previous_semester_id"),
+            previous_semester_name=prev_row.get("previous_semester_name"),
+            generated_at=prev_row.get("generated_at_source"),
+        )
+
+    switch = detect_semester_switch(prev_state, current_state)
+
+    print("----- XML SEMESTER -----")
+    print(f"current_id: {current_state.current_semester_id}")
+    print(f"current_name: {current_state.current_semester_name}")
+    print(f"previous_id: {current_state.previous_semester_id}")
+    print(f"previous_name: {current_state.previous_semester_name}")
+    print(f"generated_at: {current_state.generated_at}")
+    print("----- SWITCH CHECK -----")
+    print(f"switched: {switch.switched}")
+    print(f"reason: {switch.reason}")
+    print(f"old_semester_id: {switch.old_semester_id}")
+    print(f"new_semester_id: {switch.new_semester_id}")
+
+    if not current_state.current_semester_id:
+        print("⚠️ Brak current_semester_id w XML — pomijam zapis semester_state.")
+        return
+
+    saved = save_semester_state(
+        current_semester_id=current_state.current_semester_id,
+        current_semester_name=current_state.current_semester_name,
+        previous_semester_id=current_state.previous_semester_id,
+        previous_semester_name=current_state.previous_semester_name,
+        source_url=meta.source_url,
+        generated_at_source=current_state.generated_at,
+    )
+    if saved > 0:
+        print("✅ Zapisano semester_state.")
+    else:
+        print("⚠️ Nie zapisano semester_state (upsert zwrócił 0).")
 
 
-def _load_grupy(kierunki):
-    if XML_FIRST:
-        grupy_xml = scrape_grupy_for_kierunki_xml(kierunki)
-        if grupy_xml:
-            print(f"Grupy z XML: {len(grupy_xml)}")
-            return grupy_xml
-        print("XML grup pusty - fallback do HTML")
-
-    grupy_html = scrape_grupy_for_kierunki(kierunki)
-    print(f"Grupy z HTML: {len(grupy_html)}")
-    return grupy_html
+def _run_xml_sync():
+    print("TRYB: xml_sync (kierunki + grupy)")
+    result = sync_directions_and_groups_from_xml(verbose=True)
+    print(f"✅ XML sync result: {result}")
 
 
-def _map_groups_to_kierunki_uuid(grupy):
-    kierunek_uuid_map = get_uuid_map("kierunki", "nazwa", "id")
-    missing = 0
-
-    for g in grupy:
-        if not g.get("kierunek_id"):
-            key = (_norm(g.get("kierunek_nazwa")), _norm(g.get("wydzial")))
-            if key[0] and key[1]:
-                g["kierunek_id"] = kierunek_uuid_map.get(key)
-
-        if not g.get("kierunek_id"):
-            missing += 1
-
-        g.pop("kierunek_nazwa", None)
-        g.pop("wydzial", None)
-
-    return missing
+def _run_teacher_sync():
+    print("TRYB: teacher_sync")
+    result = sync_teacher_events_and_meta(verbose=True)
+    print(f"✅ Teacher sync result: {result}")
 
 
-def _get_all_grupa_ids_from_db():
+def _run_cleanup_only():
+    print("TRYB: cleanup_only")
+    result = deactivate_expired_records(today=dt.date.today())
+    print(f"✅ Cleanup result: {result}")
+
+
+# -------- legacy modes --------
+
+def _update_only_kierunki():
+    print("TRYB: tylko kierunki")
+    kierunki = scrape_kierunki()
+    saved = save_kierunki(kierunki)
+    print(f"Zapisano/upewniono się o {saved} kierunkach. Koniec.")
+
+
+def _update_only_groups():
+    print("TRYB: tylko grupy (kierunki + grupy)")
+    kierunki = scrape_kierunki()
+    save_kierunki(kierunki)
+    grupy = scrape_grupy_for_kierunki(kierunki)
+    save_grupy(grupy)
+    print(f"Kierunków: {len(kierunki)}, grup: {len(grupy)} – koniec.")
+
+
+def _update_only_groups_events():
+    print("TRYB: tylko zajęcia grup (ICS)")
     page = 0
     page_size = 1000
     grupa_ids = []
-
     while True:
         start = page * page_size
         end = start + page_size - 1
@@ -100,101 +154,38 @@ def _get_all_grupa_ids_from_db():
         data = res.data or []
         if not data:
             break
-
         for row in data:
             gid = row.get("grupa_id")
             if gid:
-                grupa_ids.append(gid)
-
+                grupa_ids.append(str(gid))
         if len(data) < page_size:
             break
         page += 1
 
-    return grupa_ids
-
-
-def _collect_group_events(grupa_ids):
-    all_events = []
-    grupa_ids_for_ics = []
-
-    if EVENTS_XML_FIRST:
-        for grupa_id in grupa_ids:
-            xml_events = fetch_grupy_plan_events_xml(str(grupa_id))
-            if xml_events:
-                all_events.extend(xml_events)
-            else:
-                grupa_ids_for_ics.append(grupa_id)
-    else:
-        grupa_ids_for_ics = list(grupa_ids)
-
-    if grupa_ids_for_ics:
-        wyniki = download_ics_for_groups_async(grupa_ids_for_ics)
-        for w in wyniki:
-            if w["status"] != "success":
-                print(f"Blad pobierania ICS: {w['link_ics_zrodlowy']}")
-                continue
-
-            events = parse_ics_file(w["ics_content"], link_ics_zrodlowy=w["link_ics_zrodlowy"])
-            for event in events:
-                event["grupa_id"] = w["grupa_id"]
-            all_events.extend(events)
-
-    return all_events
-
-
-def _fetch_teacher_events(external_id: str):
-    if EVENTS_XML_FIRST:
-        xml_events = fetch_nauczyciel_plan_events_xml(external_id)
-        if xml_events:
-            return xml_events
-
-    plan = pobierz_plan_ics_nauczyciela(external_id)
-    if plan.get("status") != "success" or not plan.get("ics_content"):
-        return []
-
-    return parse_ics_file(plan["ics_content"], plan["link_ics_zrodlowy"])
-
-
-def _update_only_kierunki():
-    print("TRYB: tylko kierunki")
-    kierunki = _load_kierunki()
-    saved = save_kierunki(kierunki)
-    print(f"Zapisano/upewniono sie o {saved} kierunkach. Koniec.")
-
-
-def _update_only_groups():
-    print("TRYB: tylko grupy (kierunki + grupy)")
-    kierunki = _load_kierunki()
-    save_kierunki(kierunki)
-
-    grupy = _load_grupy(kierunki)
-    missing = _map_groups_to_kierunki_uuid(grupy)
-    if missing:
-        print(f"UWAGA: {missing} grup bez mapowania kierunek_id")
-
-    saved = save_grupy(grupy)
-    print(f"Kierunkow: {len(kierunki)}, grup pobranych: {len(grupy)}, zapisanych: {saved}")
-
-
-def _update_only_groups_events():
-    print("TRYB: tylko zajecia grup")
-
-    grupa_ids = _get_all_grupa_ids_from_db()
-    print(f"Znaleziono {len(grupa_ids)} ID grup do odswiezenia")
-
+    print(f"Znaleziono {len(grupa_ids)} ID grup do odświeżenia")
     if not grupa_ids:
-        print("Brak grup w bazie - uruchom pelny scrap albo tryb 'grupy'.")
+        print("Brak grup w bazie – uruchom pełny scrap albo tryb 'grupy'.")
         return
 
+    wyniki = download_ics_for_groups_async(grupa_ids)
     grupa_uuid_map = get_uuid_map("grupy", "grupa_id", "id")
-    wszystkie_zajecia_grupy = _collect_group_events(grupa_ids)
+
+    wszystkie_zajecia_grupy = []
+    for w in wyniki:
+        if w["status"] == "success":
+            zajecia = parse_ics_file(w["ics_content"], link_ics_zrodlowy=w["link_ics_zrodlowy"])
+            for z in zajecia:
+                z["grupa_id"] = str(w["grupa_id"])
+            wszystkie_zajecia_grupy.extend(zajecia)
+        else:
+            print(f"❌ Błąd pobierania: {w['link_ics_zrodlowy']}")
 
     saved = save_zajecia_grupy(wszystkie_zajecia_grupy, grupa_uuid_map)
-    print(f"Zapisano (upsert) zajecia grup: {saved}")
+    print(f"Zapisano (upsertowane) zajęcia grup: {saved}")
 
 
 def _update_only_teachers():
-    print("TRYB: tylko nauczyciele (pelna paginacja + zajecia)")
+    print("TRYB: tylko nauczyciele (pełna paginacja + zajęcia)")
     page_size = 500
     page = 0
     all_events = []
@@ -204,42 +195,58 @@ def _update_only_teachers():
     while True:
         start = page * page_size
         end = start + page_size - 1
-        res = supabase.table("nauczyciele").select("id, link_strony_nauczyciela, external_id").range(start, end).execute()
+        res = supabase.table("nauczyciele").select("id, link_strony_nauczyciela").range(start, end).execute()
         data = res.data or []
         if not data:
             break
 
         print(f"Strona {page + 1}: {len(data)} nauczycieli")
         for row in data:
-            ext_id = row.get("external_id") or _extract_external_id(row.get("link_strony_nauczyciela"))
+            ext_id = _extract_external_id(row.get("link_strony_nauczyciela"))
             if not ext_id:
                 continue
-
-            events = _fetch_teacher_events(ext_id)
+            plan = pobierz_plan_ics_nauczyciela(ext_id)
+            if plan["status"] != "success" or not plan["ics_content"]:
+                continue
+            events = parse_ics_file(plan["ics_content"], plan["link_ics_zrodlowy"])
             if not events:
                 continue
-
-            for event in events:
-                event["nauczyciel_id"] = row["id"]
-
+            for e in events:
+                e["nauczyciel_id"] = row["id"]
             all_events.extend(events)
             total_events += len(events)
             total_teachers += 1
-
         page += 1
 
     if all_events:
         saved = save_zajecia_nauczyciela(all_events)
         print(f"Zapisano (przekazanych do upsert): {saved}")
     else:
-        print("Brak wydarzen do zapisu.")
+        print("Brak wydarzeń do zapisu.")
 
     print(f"Nauczycieli z wydarzeniami: {total_teachers}")
-    print(f"Lacznie wydarzen parsowanych: {total_events}")
+    print(f"Łącznie wydarzeń parsowanych: {total_events}")
 
 
 def main():
     mode = os.getenv("SCRAPER_ONLY", "").lower().strip()
+
+    if mode in {"xml_bootstrap", "xml_semester"}:
+        _run_xml_bootstrap()
+        return
+
+    if mode in {"xml_sync", "xml_groups"}:
+        _run_xml_sync()
+        return
+
+    if mode in {"teacher_sync", "teachers_sync"}:
+        _run_teacher_sync()
+        return
+
+    if mode in {"cleanup_only", "cleanup"}:
+        _run_cleanup_only()
+        return
+
     if mode in {"kierunki", "kierunki_only", "directions"}:
         _update_only_kierunki()
         return
@@ -253,56 +260,73 @@ def main():
         _update_only_teachers()
         return
 
-    print("ETAP 1: Pobieranie kierunkow studiow...")
-    kierunki = _load_kierunki()
+    print("ETAP 1: Pobieranie kierunków studiów...")
+    kierunki = scrape_kierunki()
     save_kierunki(kierunki)
-    print(f"Przetworzono {len(kierunki)} kierunkow")
+    print(f"Przetworzono {len(kierunki)} kierunków\n")
 
-    print("ETAP 2: Pobieranie grup dla kierunkow...")
-    wszystkie_grupy = _load_grupy(kierunki)
-    missing = _map_groups_to_kierunki_uuid(wszystkie_grupy)
-    if missing:
-        print(f"UWAGA: {missing} grup bez mapowania kierunek_id")
+    print("ETAP 2: Pobieranie grup dla kierunków...")
+    wszystkie_grupy = scrape_grupy_for_kierunki(kierunki)
 
-    saved_groups = save_grupy(wszystkie_grupy)
-    print(f"Przetworzono {len(wszystkie_grupy)} grup, zapisano {saved_groups}")
+    kierunek_uuid_map = get_uuid_map("kierunki", "nazwa", "id")
+    for g in wszystkie_grupy:
+        key = (
+            (g.get("kierunek_nazwa") or "").strip().casefold(),
+            (g.get("wydzial") or "").strip().casefold(),
+        )
+        g["kierunek_id"] = kierunek_uuid_map.get(key)
+        g.pop("kierunek_nazwa", None)
+        g.pop("wydzial", None)
+
+    save_grupy(wszystkie_grupy)
+    print(f"Przetworzono {len(wszystkie_grupy)} grup\n")
 
     grupa_uuid_map = get_uuid_map("grupy", "grupa_id", "id")
 
-    print("ETAP 3: Pobieranie nauczycieli z planow grup...")
+    print("ETAP 3: Pobieranie nauczycieli z planów grup...")
     nauczyciele_dict = {}
     for grupa in wszystkie_grupy:
         html = fetch_page(grupa.get("link_strony_grupy"))
         nauczyciele = parse_nauczyciele_from_group_page(html, grupa_id=grupa.get("grupa_id"))
         for n in nauczyciele:
             link = n.get("link")
-            if not link or link in nauczyciele_dict:
-                continue
-
-            html_n = fetch_page(link)
-            details = parse_nauczyciel_details(html_n, n.get("nauczyciel_id")) if html_n else {}
-            nauczyciele_dict[link] = {
-                "nazwa": n.get("nazwa"),
-                "instytut": details.get("instytut"),
-                "email": details.get("email"),
-                "link_strony_nauczyciela": link,
-                "link_ics_nauczyciela": details.get("link_ics_nauczyciela"),
-                "nauczyciel_id": n.get("nauczyciel_id"),
-            }
+            if link and link not in nauczyciele_dict:
+                html_n = fetch_page(link)
+                details = parse_nauczyciel_details(html_n, n.get("nauczyciel_id")) if html_n else {}
+                nauczyciele_dict[link] = {
+                    "nazwa": n.get("nazwa"),
+                    "instytut": details.get("instytut"),
+                    "email": details.get("email"),
+                    "link_strony_nauczyciela": link,
+                    "link_ics_nauczyciela": details.get("link_ics_nauczyciela"),
+                    "nauczyciel_id": n.get("nauczyciel_id"),
+                }
 
     nauczyciele_final = list(nauczyciele_dict.values())
     save_nauczyciele(nauczyciele_final)
-    print(f"Przetworzono {len(nauczyciele_final)} nauczycieli")
+    print(f"Przetworzono {len(nauczyciele_final)} nauczycieli\n")
 
     nauczyciel_uuid_map = get_uuid_map("nauczyciele", "link_strony_nauczyciela", "id")
 
-    print("ETAP 4: Pobieranie i zapisywanie zajec grup...")
-    wszystkie_id_grup = [g["grupa_id"] for g in wszystkie_grupy if g.get("grupa_id")]
-    wszystkie_zajecia_grupy = _collect_group_events(wszystkie_id_grup)
-    saved_group_events = save_zajecia_grupy(wszystkie_zajecia_grupy, grupa_uuid_map)
-    print(f"Zapisano {saved_group_events} zajec grup")
+    print("ETAP 4: Pobieranie i zapisywanie zajęć grup...")
+    wszystkie_id_grup = [str(g["grupa_id"]) for g in wszystkie_grupy if g.get("grupa_id")]
+    wyniki = download_ics_for_groups_async(wszystkie_id_grup)
+    wszystkie_zajecia_grupy = []
 
-    print("ETAP 5: Pobieranie i zapisywanie zajec nauczycieli...")
+    for w in wyniki:
+        if w["status"] == "success":
+            zajecia = parse_ics_file(w["ics_content"], link_ics_zrodlowy=w["link_ics_zrodlowy"])
+            for z in zajecia:
+                z["grupa_id"] = str(w["grupa_id"])
+            wszystkie_zajecia_grupy.extend(zajecia)
+            print(f"Pobrano {len(zajecia)} zajęć dla grupy {w['grupa_id']}")
+        else:
+            print(f"❌ Błąd pobierania ICS: {w['link_ics_zrodlowy']}")
+
+    save_zajecia_grupy(wszystkie_zajecia_grupy, grupa_uuid_map)
+    print(f"Zapisano {len(wszystkie_zajecia_grupy)} zajęć grup\n")
+
+    print("ETAP 5: Pobieranie i zapisywanie zajęć nauczycieli...")
     wszystkie_zajecia_nauczyciela = []
     missing_uuid = []
     created_on_demand = 0
@@ -313,26 +337,24 @@ def main():
         nazwa = n.get("nazwa")
         link_strony = n.get("link_strony_nauczyciela")
         if not external_id:
-            print(f"Brak external_id dla nauczyciela {nazwa} ({link_strony})")
             continue
 
-        uuid_key = _norm(link_strony)
+        uuid_key = (link_strony or "").strip().casefold()
         uuid_row = nauczyciel_uuid_map.get(uuid_key)
 
         if not uuid_row and allow_ondemand:
             try:
                 supabase.table("nauczyciele").upsert(
-                    [
-                        {
-                            "nazwa": nazwa,
-                            "link_strony_nauczyciela": link_strony,
-                            "instytut": n.get("instytut"),
-                            "email": n.get("email"),
-                            "link_ics_nauczyciela": n.get("link_ics_nauczyciela"),
-                        }
-                    ],
+                    [{
+                        "nazwa": nazwa,
+                        "link_strony_nauczyciela": link_strony,
+                        "instytut": n.get("instytut"),
+                        "email": n.get("email"),
+                        "link_ics_nauczyciela": n.get("link_ics_nauczyciela"),
+                    }],
                     on_conflict="link_strony_nauczyciela",
                 ).execute()
+
                 res = (
                     supabase.table("nauczyciele")
                     .select("id,link_strony_nauczyciela")
@@ -345,38 +367,31 @@ def main():
                     nauczyciel_uuid_map[uuid_key] = uuid_row
                     created_on_demand += 1
             except Exception as e:
-                print(f"Nie udalo sie dodac nauczyciela on-demand: {nazwa} -> {e}")
+                print(f"❌ On-demand add teacher failed: {nazwa} -> {e}")
 
         if not uuid_row:
             missing_uuid.append({"external_id": external_id, "nazwa": nazwa, "link": link_strony})
-            print(f"Brak UUID dla nauczyciela {nazwa} (ext_id={external_id})")
             continue
 
-        zajecia = _fetch_teacher_events(external_id)
-        if not zajecia:
-            print(f"Nie udalo sie pobrac planu dla nauczyciela {nazwa} (ext_id={external_id})")
-            continue
-
-        for z in zajecia:
-            z["nauczyciel_id"] = uuid_row
-
-        wszystkie_zajecia_nauczyciela.extend(zajecia)
-        print(f"Pobrano {len(zajecia)} zajec dla nauczyciela {nazwa} (ext_id={external_id})")
+        plan = pobierz_plan_ics_nauczyciela(external_id)
+        if plan["status"] == "success" and plan["ics_content"]:
+            zajecia = parse_ics_file(plan["ics_content"], link_ics_zrodlowy=plan["link_ics_zrodlowy"])
+            for z in zajecia:
+                z["nauczyciel_id"] = uuid_row
+            wszystkie_zajecia_nauczyciela.extend(zajecia)
 
     saved_teacher_events = save_zajecia_nauczyciela(wszystkie_zajecia_nauczyciela, nauczyciel_uuid_map)
-    print(f"Zapisano {saved_teacher_events} zajec nauczycieli (po deduplikacji)")
+    print(f"Zapisano {saved_teacher_events} zajęć nauczycieli (po deduplikacji)")
 
     if missing_uuid:
-        print(f"Podsumowanie: {len(missing_uuid)} nauczycieli bez UUID (pokazuje do 10)")
+        print(f"⚠️ Nauczyciele bez UUID: {len(missing_uuid)}")
         for item in missing_uuid[:10]:
             print(f" - {item['nazwa']} (ext_id={item['external_id']}) {item['link']}")
-
     if created_on_demand:
-        print(f"Utworzono on-demand {created_on_demand} brakujacych rekordow nauczycieli")
+        print(f"ℹ️ Utworzono on-demand {created_on_demand} rekordów nauczycieli")
 
-    print("Zakonczono proces MVP.")
+    print("Zakończono proces MVP.")
 
 
 if __name__ == "__main__":
     main()
-

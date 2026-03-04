@@ -1,93 +1,127 @@
-﻿from dotenv import load_dotenv
-import hashlib
+from __future__ import annotations
+
+from dotenv import load_dotenv
 import os
 import time
-from pathlib import Path
+import datetime as dt
 from dataclasses import asdict, is_dataclass
-from typing import Any, Dict, List
-from datetime import datetime
+from typing import Dict, Any, List, Optional
 
 from supabase import create_client
 
-project_root = Path(__file__).resolve().parent.parent
-load_dotenv(project_root / ".env")
-load_dotenv(Path.cwd() / ".env")
 load_dotenv()
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    missing = []
-    if not SUPABASE_URL:
-        missing.append("SUPABASE_URL")
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        missing.append("SUPABASE_SERVICE_ROLE_KEY")
-    missing_str = ", ".join(missing)
-    raise RuntimeError(
-        f"Brak zmiennych srodowiskowych: {missing_str}. "
-        f"Utworz plik .env w {project_root} albo ustaw je w sesji PowerShell."
-    )
-
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-def _norm(value: Any) -> str:
-    return str(value).strip().casefold()
+
+# =========================
+# Helpers
+# =========================
+
+def chunks(lst: List[Any], n: int):
+    """Dzieli listę na części o rozmiarze n."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
 
-def _str(value: Any) -> str:
-    return "" if value is None else str(value)
-
-
-def _hash_values(*values: Any) -> str:
-    raw = "|".join(_str(v).strip() for v in values)
-    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
-
-
-
-def _normalize_timestamp(value: Any) -> str | None:
+def _to_iso_date(value: Any) -> Optional[str]:
+    """
+    Zamienia date/datetime/string -> YYYY-MM-DD (jeśli możliwe).
+    """
     if value is None:
         return None
-
-    if isinstance(value, datetime):
+    if isinstance(value, dt.datetime):
+        return value.date().isoformat()
+    if isinstance(value, dt.date):
         return value.isoformat()
 
-    text = str(value).strip()
-    if not text:
+    s = str(value).strip()
+    if not s:
         return None
 
-    upper = text.upper()
-    if upper in {"NO_DATE", "NO_START", "NO_END", "NULL", "NONE"}:
-        return None
+    # YYYY-MM-DD...
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
 
-    candidate = text.replace("Z", "+00:00")
+    # DD.MM.YYYY
     try:
-        datetime.fromisoformat(candidate)
-        return text
+        d = dt.datetime.strptime(s, "%d.%m.%Y").date()
+        return d.isoformat()
     except ValueError:
-        return None
+        pass
+
+    # YYYYMMDD
+    if s.isdigit() and len(s) == 8:
+        try:
+            d = dt.datetime.strptime(s, "%Y%m%d").date()
+            return d.isoformat()
+        except ValueError:
+            return None
+
+    return None
+
+
+def _upsert_with_retry(
+    table: str,
+    data: List[dict],
+    on_conflict: str,
+    max_retries: int = 3,
+    backoff_start: float = 1.5,
+) -> int:
+    """
+    Uniwersalny upsert z retry dla problemów sieciowych/timeouts.
+    Zwraca liczbę rekordów przekazanych do upsert.
+    """
+    if not data:
+        return 0
+
+    attempt = 0
+    backoff = backoff_start
+    while attempt < max_retries:
+        try:
+            supabase.table(table).upsert(data, on_conflict=on_conflict).execute()
+            return len(data)
+        except Exception as e:
+            msg = str(e).lower()
+            attempt += 1
+            retriable = any(tok in msg for tok in ["timed out", "timeout", "ssl", "did not complete", "connection"])
+            if retriable and attempt < max_retries:
+                print(f"⚠️ Retry {attempt}/{max_retries} dla {table}: {str(e)[:120]}...")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            print(f"❌ Upsert failed [{table}]: {e}")
+            return 0
+    return 0
+
+
+# =========================
+# UUID maps
+# =========================
 
 def get_uuid_map(table: str, key_col: str, id_col: str) -> Dict:
     """Pobiera mapowanie kluczy do UUID z bazy."""
     if table == "kierunki":
         result = supabase.table(table).select(f"{key_col}, wydzial, {id_col}").execute()
         return {
-            (_norm(row[key_col]), _norm(row["wydzial"])): row[id_col]
-            for row in (result.data or [])
+            (str(row[key_col]).strip().casefold(), str(row["wydzial"]).strip().casefold()): row[id_col]
+            for row in result.data
             if row.get(key_col) and row.get("wydzial")
         }
+    else:
+        result = supabase.table(table).select(f"{key_col}, {id_col}").execute()
+        return {
+            str(row[key_col]).strip().casefold(): row[id_col]
+            for row in result.data
+            if row.get(key_col)
+        }
 
-    result = supabase.table(table).select(f"{key_col}, {id_col}").execute()
-    return {
-        _norm(row[key_col]): row[id_col]
-        for row in (result.data or [])
-        if row.get(key_col)
-    }
 
-
-def chunks(lst: List[Any], n: int):
-    for i in range(0, len(lst), n):
-        yield lst[i : i + n]
-
+# =========================
+# Existing saves
+# =========================
 
 def save_kierunki(kierunki, batch_size=100):
     if not kierunki:
@@ -99,141 +133,52 @@ def save_kierunki(kierunki, batch_size=100):
         for k in batch:
             if is_dataclass(k):
                 k = asdict(k)
-
-            nazwa = k.get("nazwa")
-            wydzial = k.get("wydzial")
-            if not nazwa or not wydzial:
+            if not k.get("nazwa") or not k.get("wydzial"):
                 continue
+            data.append({
+                "nazwa": k["nazwa"],
+                "wydzial": k["wydzial"]
+            })
 
-            data.append(
-                {
-                    "nazwa": nazwa,
-                    "wydzial": wydzial,
-                    "external_id": k.get("external_id") or k.get("xml_kierunek_id"),
-                }
-            )
-
-        if not data:
-            continue
-
-        try:
-            supabase.table("kierunki").upsert(data, on_conflict="nazwa,wydzial").execute()
-            total += len(data)
-        except Exception as e:
-            print(f"Blad zapisu kierunkow: {e}")
-
+        total += _upsert_with_retry("kierunki", data, on_conflict="nazwa,wydzial")
     return total
 
 
 def save_grupy(grupy, batch_size=500):
-    """Zapisuje grupy; preferuje unikalnosc po grupa_id i zapisuje semestr."""
     if not grupy:
         return 0
 
     seen = set()
     unique_grupy = []
-    skipped_without_kierunek = 0
-
     for g in grupy:
-        if is_dataclass(g):
-            g = asdict(g)
+        key = (g.get("kod_grupy"), g.get("kierunek_id"))
+        if key not in seen:
+            seen.add(key)
+            unique_grupy.append(g)
 
-        if not g.get("kierunek_id"):
-            skipped_without_kierunek += 1
-            continue
-
-        grupa_id = g.get("grupa_id")
-        if grupa_id:
-            key = ("grupa_id", str(grupa_id))
-        else:
-            key = (
-                "fallback",
-                g.get("kod_grupy"),
-                g.get("kierunek_id"),
-                g.get("tryb_studiow"),
-                g.get("semestr"),
-            )
-
-        if key in seen:
-            continue
-        seen.add(key)
-        unique_grupy.append(g)
-
-    if skipped_without_kierunek:
-        print(f"Ominieto {skipped_without_kierunek} grup bez kierunek_id (zabezpieczenie FK)")
-
-    conflict_candidates = [
-        os.getenv("GROUP_UPSERT_CONFLICT", "grupa_id"),
-        "kod_grupy,kierunek_id",
-    ]
-    active_conflict = None
-    include_semestr = True
     total = 0
-
     for batch in chunks(unique_grupy, batch_size):
-        data = [
-            {
+        data = []
+        for g in batch:
+            if is_dataclass(g):
+                g = asdict(g)
+
+            # FIX: tryb_studiow nie może być null (DB NOT NULL)
+            tryb = g.get("tryb_studiow")
+            if tryb is None or str(tryb).strip() == "":
+                tryb = "nieznany"
+
+            data.append({
                 "kod_grupy": g.get("kod_grupy"),
                 "kierunek_id": g.get("kierunek_id"),
                 "link_strony_grupy": g.get("link_strony_grupy"),
                 "link_ics_grupy": g.get("link_ics_grupy"),
-                "tryb_studiow": g.get("tryb_studiow") or "nieznane",
-                "semestr": g.get("semestr"),
+                "tryb_studiow": tryb,
                 "grupa_id": g.get("grupa_id"),
-            }
-            for g in batch
-        ]
-        if not data:
-            continue
+            })
 
-        payload = data if include_semestr else [{k: v for k, v in row.items() if k != "semestr"} for row in data]
-
-        if active_conflict:
-            try:
-                supabase.table("grupy").upsert(payload, on_conflict=active_conflict).execute()
-                total += len(payload)
-            except Exception as e:
-                print(f"Blad zapisu grup (on_conflict={active_conflict}): {e}")
-            continue
-
-        saved = False
-        last_error = None
-
-        for conflict in conflict_candidates:
-            if not conflict:
-                continue
-            try:
-                supabase.table("grupy").upsert(payload, on_conflict=conflict).execute()
-                active_conflict = conflict
-                total += len(payload)
-                saved = True
-                print(f"Uzywam konfliktu upsert dla grup: {active_conflict}")
-                break
-            except Exception as e:
-                last_error = e
-
-        if not saved and include_semestr:
-            payload_without_semestr = [{k: v for k, v in row.items() if k != "semestr"} for row in data]
-            for conflict in conflict_candidates:
-                if not conflict:
-                    continue
-                try:
-                    supabase.table("grupy").upsert(payload_without_semestr, on_conflict=conflict).execute()
-                    include_semestr = False
-                    active_conflict = conflict
-                    total += len(payload_without_semestr)
-                    saved = True
-                    print("Kolumna semestr nie jest jeszcze w bazie - zapis grup bez semestru")
-                    print(f"Uzywam konfliktu upsert dla grup: {active_conflict}")
-                    break
-                except Exception as e:
-                    last_error = e
-
-        if not saved:
-            print(f"Blad zapisu grup: {last_error}")
-
+        total += _upsert_with_retry("grupy", data, on_conflict="kod_grupy,kierunek_id")
     return total
-
 
 def save_nauczyciele(nauczyciele, batch_size=500):
     if not nauczyciele:
@@ -243,20 +188,15 @@ def save_nauczyciele(nauczyciele, batch_size=500):
     for n in nauczyciele:
         if is_dataclass(n):
             n = asdict(n)
-
         link = n.get("link_strony_nauczyciela")
         if not link:
             continue
 
-        external_id = n.get("external_id") or n.get("nauczyciel_id")
-
         if link in nauczyciele_by_link:
             existing = nauczyciele_by_link[link]
-            for key in ["instytut", "email", "link_ics_nauczyciela", "external_id"]:
+            for key in ["instytut", "email", "link_ics_nauczyciela"]:
                 if not existing.get(key) and n.get(key):
                     existing[key] = n.get(key)
-            if not existing.get("external_id") and external_id:
-                existing["external_id"] = external_id
         else:
             nauczyciele_by_link[link] = {
                 "nazwa": n.get("nazwa"),
@@ -264,172 +204,82 @@ def save_nauczyciele(nauczyciele, batch_size=500):
                 "email": n.get("email"),
                 "link_strony_nauczyciela": link,
                 "link_ics_nauczyciela": n.get("link_ics_nauczyciela"),
-                "external_id": external_id,
             }
 
-    print(f"Po deduplikacji nauczycieli: {len(nauczyciele_by_link)}")
+    print(f"ℹ️ Duplikaty linków nauczycieli: {len(nauczyciele) - len(nauczyciele_by_link)}")
+    nauczyciele_list = list(nauczyciele_by_link.values())
 
     total = 0
-    for batch in chunks(list(nauczyciele_by_link.values()), batch_size):
-        try:
-            supabase.table("nauczyciele").upsert(batch, on_conflict="link_strony_nauczyciela").execute()
-            total += len(batch)
-        except Exception as e:
-            print(f"Blad zapisu batcha nauczycieli: {e}")
-            if batch:
-                print(f"Przykladowy rekord z bledem: {batch[0]}")
-
+    for batch in chunks(nauczyciele_list, batch_size):
+        total += _upsert_with_retry("nauczyciele", batch, on_conflict="link_strony_nauczyciela")
     return total
 
 
 def save_zajecia_grupy(events, grupa_uuid_map, batch_size=500):
-    """Zapis do nowej tabeli public.zajecia_grup."""
     if not events:
         return 0
-
     if not grupa_uuid_map:
-        print("UWAGA: grupa_uuid_map jest puste. Najpierw dodaj grupy do bazy.")
+        print("⚠️ grupa_uuid_map puste — pomijam save_zajecia_grupy")
         return 0
 
-    total = 0
-    skipped = 0
     seen = set()
     batch_data = []
+    skipped = 0
 
     for event in events:
         if is_dataclass(event):
             event = asdict(event)
-
         grupa_id = event.get("grupa_id")
         if not grupa_id:
             skipped += 1
             continue
 
-        grupa_uuid = grupa_uuid_map.get(_norm(grupa_id)) or grupa_uuid_map.get(str(grupa_id))
+        grupa_uuid = grupa_uuid_map.get(str(grupa_id))
         if not grupa_uuid:
             skipped += 1
             continue
 
-        uid = event.get("uid")
-        start_time = _normalize_timestamp(event.get("od"))
-        end_time = _normalize_timestamp(event.get("do_"))
-        subject = event.get("przedmiot")
-        teacher_name = event.get("nauczyciel_nazwa") or event.get("nauczyciel")
-        location = event.get("miejsce")
-        rz = event.get("rz")
-        podgrupa = (event.get("podgrupa") or "")[:20]
-
-        if not start_time or not end_time:
-            skipped += 1
+        key = (event.get("uid"), grupa_uuid)
+        if key in seen:
             continue
+        seen.add(key)
 
-        row_hash = _hash_values(
-            grupa_uuid,
-            uid,
-            start_time,
-            end_time,
-            subject,
-            teacher_name,
-            location,
-            rz,
-            podgrupa,
-        )
+        batch_data.append({
+            "uid": event.get("uid"),
+            "podgrupa": (event.get("podgrupa") or "")[:20],
+            "od": event.get("od"),
+            "do_": event.get("do_"),
+            "przedmiot": event.get("przedmiot"),
+            "rz": event.get("rz"),
+            "nauczyciel": event.get("nauczyciel_nazwa") or event.get("nauczyciel"),
+            "miejsce": event.get("miejsce"),
+            "grupa_id": grupa_uuid,
+            "link_ics_zrodlowy": event.get("link_ics_zrodlowy"),
+        })
 
-        if row_hash in seen:
-            continue
-        seen.add(row_hash)
-
-        source_link = event.get("link_ics_zrodlowy")
-        source_type = "xml" if source_link and "/static_files/" in source_link else "ics"
-
-        batch_data.append(
-            {
-                "uid": uid,
-                "podgrupa": podgrupa or None,
-                "od": start_time,
-                "do_": end_time,
-                "przedmiot": subject,
-                "rz": rz,
-                "prowadzacy": teacher_name,
-                "miejsce": location,
-                "grupa_id": grupa_uuid,
-                "zrodlo_typ": source_type,
-                "zrodlo_link": source_link,
-                "semestr_id": event.get("semestr_id") or event.get("semester_id"),
-                "hash": row_hash,
-            }
-        )
-
-    if skipped:
-        print(f"Pominieto {skipped} zajec grup (brak mapowania/grupa_id/czasu)")
-
+    print(f"ℹ️ Pominięte zajęcia grup: {skipped}")
+    total = 0
     for batch in chunks(batch_data, batch_size):
-        if not batch:
-            continue
-
-        try:
-            supabase.table("zajecia_grup").upsert(batch, on_conflict="grupa_id,uid").execute()
-            total += len(batch)
-        except Exception as e:
-            print(f"Blad podczas upsertowania zajec grup: {e}")
-            print(f"Przykladowy rekord: {batch[0]}")
-
-    return total
-def _insert_teacher_events_without_unique_index(data_batch):
-    """
-    Fallback gdy brak unique (uid,nauczyciel_id).
-    Robimy delikatna deduplikacje przez odczyt istniejacych uid dla nauczyciela.
-    """
-    inserted = 0
-
-    grouped = {}
-    for row in data_batch:
-        grouped.setdefault(row["nauczyciel_id"], []).append(row)
-
-    for nauczyciel_id, rows in grouped.items():
-        uids = list({r.get("uid") for r in rows if r.get("uid")})
-        existing_keys = set()
-
-        for uid_chunk in chunks(uids, 200):
-            try:
-                res = (
-                    supabase.table("zajecia_nauczycieli")
-                    .select("uid,nauczyciel_id")
-                    .eq("nauczyciel_id", nauczyciel_id)
-                    .in_("uid", uid_chunk)
-                    .execute()
-                )
-                for row in (res.data or []):
-                    existing_keys.add((row.get("uid"), row.get("nauczyciel_id")))
-            except Exception as e:
-                print(f"Blad odczytu istniejacych zajec nauczyciela: {e}")
-
-        to_insert = []
-        for row in rows:
-            key = (row.get("uid"), row.get("nauczyciel_id"))
-            if key in existing_keys:
+        # lokalna deduplikacja
+        local_seen = set()
+        dedup = []
+        for r in batch:
+            k = (r["uid"], r["grupa_id"])
+            if k in local_seen:
                 continue
-            existing_keys.add(key)
-            to_insert.append(row)
+            local_seen.add(k)
+            dedup.append(r)
 
-        if not to_insert:
-            continue
+        total += _upsert_with_retry("zajecia_grupy", dedup, on_conflict="uid,grupa_id")
+    return total
 
-        try:
-            supabase.table("zajecia_nauczycieli").insert(to_insert).execute()
-            inserted += len(to_insert)
-        except Exception as e:
-            print(f"Blad insertowania zajec nauczyciela (fallback): {e}")
-            print(f"Przykladowy rekord: {to_insert[0]}")
 
-    return inserted
 def save_zajecia_nauczyciela(events, nauczyciel_uuid_map=None, batch_size=1000):
     if not events:
         return 0
 
-    total = 0
-    batch_data = []
     seen = set()
+    batch_data = []
     duplicates = 0
 
     for event in events:
@@ -439,11 +289,7 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid_map=None, batch_size=1000):
         uuid = event.get("nauczyciel_id")
         if not uuid:
             continue
-
-        start_time = _normalize_timestamp(event.get("od"))
-        end_time = _normalize_timestamp(event.get("do_"))
-
-        if not (event.get("uid") and start_time and end_time and event.get("przedmiot")):
+        if not (event.get("uid") and event.get("od") and event.get("do_") and event.get("przedmiot")):
             continue
 
         key = (event.get("uid"), uuid)
@@ -452,104 +298,227 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid_map=None, batch_size=1000):
             continue
         seen.add(key)
 
-        source_link = event.get("link_ics_zrodlowy")
-        source_type = "xml" if source_link and "/static_files/" in source_link else "ics"
-
-        batch_data.append(
-            {
-                "uid": event.get("uid"),
-                "od": start_time,
-                "do_": end_time,
-                "przedmiot": event.get("przedmiot"),
-                "rz": event.get("rz"),
-                "grupy": event.get("grupy"),
-                "miejsce": event.get("miejsce"),
-                "nauczyciel_id": uuid,
-                "zrodlo_typ": source_type,
-                "zrodlo_link": source_link,
-                "semestr_id": event.get("semestr_id") or event.get("semester_id"),
-            }
-        )
+        batch_data.append({
+            "uid": event.get("uid"),
+            "od": event.get("od"),
+            "do_": event.get("do_"),
+            "przedmiot": event.get("przedmiot"),
+            "rz": event.get("rz"),
+            "grupy": event.get("grupy"),
+            "miejsce": event.get("miejsce"),
+            "nauczyciel_id": uuid,
+            "link_ics_zrodlowy": event.get("link_ics_zrodlowy"),
+        })
 
     if duplicates:
-        print(f"Wykryto i pominieto {duplicates} duplikatow (uid,nauczyciel_id)")
+        print(f"ℹ️ Duplikaty nauczyciel events pominięte: {duplicates}")
 
-    max_retries = int(os.getenv("TEACHER_EVENTS_MAX_RETRIES", "3"))
-    teacher_conflict = os.getenv("TEACHER_EVENTS_CONFLICT", "uid,nauczyciel_id")
-    no_unique_mode = False
-
-    def _upsert_with_retry(data_batch):
-        nonlocal total, no_unique_mode
-
-        if no_unique_mode:
-            total += _insert_teacher_events_without_unique_index(data_batch)
-            return
-
-        attempt = 0
-        backoff = 2
-
-        while attempt < max_retries:
-            try:
-                supabase.table("zajecia_nauczycieli").upsert(data_batch, on_conflict=teacher_conflict).execute()
-                total += len(data_batch)
-                return
-            except Exception as e:
-                msg = str(e).lower()
-
-                if "there is no unique or exclusion constraint" in msg or "42p10" in msg:
-                    no_unique_mode = True
-                    print("Brak unikalnego indeksu dla upsert zajec nauczycieli - fallback do insert z deduplikacja")
-                    total += _insert_teacher_events_without_unique_index(data_batch)
-                    return
-
-                if "cannot affect row a second time" in msg:
-                    dedup_seen = set()
-                    filtered = []
-                    for row in data_batch:
-                        key = (row["uid"], row["nauczyciel_id"])
-                        if key in dedup_seen:
-                            continue
-                        dedup_seen.add(key)
-                        filtered.append(row)
-
-                    if len(filtered) != len(data_batch):
-                        data_batch = filtered
-                        continue
-
-                    if len(data_batch) > 1:
-                        mid = len(data_batch) // 2
-                        _upsert_with_retry(data_batch[:mid])
-                        _upsert_with_retry(data_batch[mid:])
-                        return
-
-                if any(token in msg for token in ["timed out", "did not complete", "timeout", "ssl"]):
-                    attempt += 1
-                    if attempt < max_retries:
-                        time.sleep(backoff)
-                        backoff *= 2
-                        continue
-
-                print(f"Blad podczas upsertowania zajec nauczyciela: {e}")
-                if data_batch:
-                    print(f"Przykladowy rekord: {data_batch[0]}")
-                return
-
+    total = 0
     for batch in chunks(batch_data, batch_size):
+        # ostateczna deduplikacja w batchu
         local_seen = set()
-        final_batch = []
-        for row in batch:
-            key = (row["uid"], row["nauczyciel_id"])
-            if key in local_seen:
+        dedup = []
+        for r in batch:
+            k = (r["uid"], r["nauczyciel_id"])
+            if k in local_seen:
                 continue
-            local_seen.add(key)
-            final_batch.append(row)
+            local_seen.add(k)
+            dedup.append(r)
 
-        if not final_batch:
-            continue
-
-        _upsert_with_retry(final_batch)
-
+        total += _upsert_with_retry("zajecia_nauczyciela", dedup, on_conflict="uid,nauczyciel_id")
     return total
 
 
+# =========================
+# NEW: Semester state
+# =========================
 
+def get_semester_state() -> Optional[dict]:
+    """
+    Odczyt ostatniego zapisanego stanu semestru.
+    Zakładamy tabelę: semester_state
+    kolumny m.in.:
+      - current_semester_id
+      - current_semester_name
+      - previous_semester_id
+      - previous_semester_name
+      - source_url
+      - generated_at_source
+      - updated_at
+    """
+    try:
+        res = (
+            supabase.table("semester_state")
+            .select("*")
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        data = res.data or []
+        return data[0] if data else None
+    except Exception as e:
+        print(f"❌ get_semester_state error: {e}")
+        return None
+
+
+def save_semester_state(
+    current_semester_id: Optional[str],
+    current_semester_name: Optional[str],
+    previous_semester_id: Optional[str] = None,
+    previous_semester_name: Optional[str] = None,
+    source_url: Optional[str] = None,
+    generated_at_source: Optional[str] = None,
+) -> int:
+    """
+    Upsert stanu semestru.
+    Wersja prosta: jeden wiersz logiczny po current_semester_id.
+    """
+    payload = [{
+        "current_semester_id": current_semester_id,
+        "current_semester_name": current_semester_name,
+        "previous_semester_id": previous_semester_id,
+        "previous_semester_name": previous_semester_name,
+        "source_url": source_url,
+        "generated_at_source": generated_at_source,
+        "updated_at": dt.datetime.utcnow().isoformat(),
+    }]
+    return _upsert_with_retry("semester_state", payload, on_conflict="current_semester_id")
+
+
+# =========================
+# NEW: Schedule meta
+# =========================
+
+def save_group_schedule_meta(rows: list[dict], batch_size: int = 500) -> int:
+    """
+    Tabela: group_schedule_meta
+    expected keys per row:
+      - grupa_id (UUID z tabeli grupy)
+      - semester_id
+      - last_schedule_date (YYYY-MM-DD)
+      - is_active (bool)
+      - source_kind ('xml'/'ics')
+    unique: (grupa_id, semester_id)
+    """
+    if not rows:
+        return 0
+
+    clean = []
+    for r in rows:
+        grupa_id = r.get("grupa_id")
+        semester_id = r.get("semester_id")
+        if not grupa_id or not semester_id:
+            continue
+        clean.append({
+            "grupa_id": grupa_id,
+            "semester_id": str(semester_id),
+            "last_schedule_date": _to_iso_date(r.get("last_schedule_date")),
+            "is_active": bool(r.get("is_active", True)),
+            "source_kind": r.get("source_kind") or "xml",
+            "updated_at": dt.datetime.utcnow().isoformat(),
+        })
+
+    total = 0
+    for batch in chunks(clean, batch_size):
+        total += _upsert_with_retry("group_schedule_meta", batch, on_conflict="grupa_id,semester_id")
+    return total
+
+
+def save_teacher_schedule_meta(rows: list[dict], batch_size: int = 500) -> int:
+    """
+    Tabela: teacher_schedule_meta
+    expected keys:
+      - nauczyciel_id (UUID)
+      - semester_id
+      - last_schedule_date
+      - is_active
+      - source_kind
+    unique: (nauczyciel_id, semester_id)
+    """
+    if not rows:
+        return 0
+
+    clean = []
+    for r in rows:
+        nauczyciel_id = r.get("nauczyciel_id")
+        semester_id = r.get("semester_id")
+        if not nauczyciel_id or not semester_id:
+            continue
+        clean.append({
+            "nauczyciel_id": nauczyciel_id,
+            "semester_id": str(semester_id),
+            "last_schedule_date": _to_iso_date(r.get("last_schedule_date")),
+            "is_active": bool(r.get("is_active", True)),
+            "source_kind": r.get("source_kind") or "xml",
+            "updated_at": dt.datetime.utcnow().isoformat(),
+        })
+
+    total = 0
+    for batch in chunks(clean, batch_size):
+        total += _upsert_with_retry("teacher_schedule_meta", batch, on_conflict="nauczyciel_id,semester_id")
+    return total
+
+
+# =========================
+# NEW: Cleanup
+# =========================
+
+def deactivate_expired_records(today: Optional[dt.date] = None) -> dict:
+    """
+    Oznacza rekordy meta jako nieaktywne, gdy:
+      last_schedule_date < today
+    Zwraca licznik zmian (best-effort).
+    """
+    if today is None:
+        today = dt.date.today()
+    today_iso = today.isoformat()
+
+    changed_groups = 0
+    changed_teachers = 0
+
+    # group_schedule_meta
+    try:
+        # najpierw pobierz kandydatów
+        res = (
+            supabase.table("group_schedule_meta")
+            .select("id,last_schedule_date,is_active")
+            .lt("last_schedule_date", today_iso)
+            .eq("is_active", True)
+            .execute()
+        )
+        rows = res.data or []
+        if rows:
+            ids = [r["id"] for r in rows if r.get("id")]
+            if ids:
+                supabase.table("group_schedule_meta").update(
+                    {"is_active": False, "updated_at": dt.datetime.utcnow().isoformat()}
+                ).in_("id", ids).execute()
+                changed_groups = len(ids)
+    except Exception as e:
+        print(f"❌ deactivate_expired_records group meta error: {e}")
+
+    # teacher_schedule_meta
+    try:
+        res = (
+            supabase.table("teacher_schedule_meta")
+            .select("id,last_schedule_date,is_active")
+            .lt("last_schedule_date", today_iso)
+            .eq("is_active", True)
+            .execute()
+        )
+        rows = res.data or []
+        if rows:
+            ids = [r["id"] for r in rows if r.get("id")]
+            if ids:
+                supabase.table("teacher_schedule_meta").update(
+                    {"is_active": False, "updated_at": dt.datetime.utcnow().isoformat()}
+                ).in_("id", ids).execute()
+                changed_teachers = len(ids)
+    except Exception as e:
+        print(f"❌ deactivate_expired_records teacher meta error: {e}")
+
+    return {
+        "groups_deactivated": changed_groups,
+        "teachers_deactivated": changed_teachers,
+        "as_of": today_iso,
+    }
