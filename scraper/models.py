@@ -2,12 +2,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# Kierunek
 @dataclass
 class Kierunek:
     nazwa: str
     wydzial: str
 
 
+# Grupa
 @dataclass
 class Grupa:
     kod_grupy: str
@@ -15,9 +17,9 @@ class Grupa:
     link_strony_grupy: Optional[str] = None
     link_ics_grupy: Optional[str] = None
     tryb_studiow: Optional[str] = None
-    semestr: Optional[str] = None
 
 
+# Nauczyciel
 @dataclass
 class Nauczyciel:
     nazwa: str
@@ -27,11 +29,12 @@ class Nauczyciel:
     link_ics_nauczyciela: Optional[str] = None
 
 
+# Zajęcia grupy
 @dataclass
 class ZajeciaGrupy:
     uid: str
     podgrupa: Optional[str]
-    od: str
+    od: str  # ISO datetime string lub datetime
     do_: str
     przedmiot: str
     rz: Optional[str]
@@ -41,6 +44,7 @@ class ZajeciaGrupy:
     link_ics_zrodlowy: Optional[str] = None
 
 
+# Zajęcia nauczyciela
 @dataclass
 class ZajeciaNauczyciela:
     uid: str

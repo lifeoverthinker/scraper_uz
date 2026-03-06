@@ -3,28 +3,34 @@ from icalendar import Calendar
 import re
 from typing import Tuple, List, Dict, Optional, Any
 
-
 # --- Sekcja: Parsowanie ICS grupy ---
 
 def wyodrebnij_dane_z_summary_grupa(summary: str) -> Tuple[str, Optional[str], Optional[str]]:
     """
     Ekstrahuje przedmiot, nauczyciela i podgrupę (PG) z opisu ICS GRUPY.
     """
-    przedmiot = summary
+    przedmiot = summary or ""
     nauczyciel = None
     pg = None
-    match = re.search(r"^(.*?)\s*\([^\)]+\):\s*(.+?)(?:\s*\(PG:.*\))?$", summary)
+
+    if not isinstance(przedmiot, str):
+        przedmiot = str(przedmiot)
+
+    # common patterns: "PRZEDMIOT (PROWADZĄCY): NAUCZYCIEL (PG: X)"
+    match = re.search(r"^(.*?)\s*\([^\)]+\):\s*(.+?)(?:\s*\(PG:.*\))?$", przedmiot)
     if match:
         przedmiot = match.group(1).strip()
         nauczyciel = match.group(2).strip()
     else:
-        przedmiot = summary.strip()
-    pg_match = re.search(r"\(PG:\s*([^)]+)\)", summary)
+        przedmiot = przedmiot.strip()
+
+    pg_match = re.search(r"\(PG:\s*([^)]+)\)", przedmiot)
     if pg_match:
         pg = pg_match.group(1).strip()
+    # remove PG marker from teacher if present
     if nauczyciel:
         nauczyciel = re.sub(r"\(PG:.*?\)", "", nauczyciel).strip()
-    return przedmiot, nauczyciel, pg
+    return przedmiot, nauczyciel or None, pg or None
 
 
 def parse_ics(
@@ -37,6 +43,7 @@ def parse_ics(
 ) -> List[Dict[str, Any]]:
     """
     Parsuje plik ICS grupy i zwraca listę wydarzeń (zajęć).
+    Format wyjściowy zgodny z oczekiwaniami run_events/db: klucze typu subject/start_time/end_time/location/uid/teacher_name/podgrupa/grupa_id/link_ics_zrodlowy/rz
     """
     if not ics_content:
         return []
@@ -44,12 +51,14 @@ def parse_ics(
     try:
         cal = Calendar.from_ical(ics_content)
         for component in cal.walk('VEVENT'):
-            summary = str(component.get('summary', ''))
+            summary = str(component.get('summary', '') or '')
             categories = component.get('categories')
-            start_time = component.get('dtstart').dt
-            end_time = component.get('dtend').dt
-            location = str(component.get('location', ''))
-            uid = str(component.get('uid', ''))
+            dtstart = component.get('dtstart')
+            dtend = component.get('dtend')
+            start_time = getattr(dtstart, "dt", None)
+            end_time = getattr(dtend, "dt", None)
+            location = str(component.get('location', '') or '')
+            uid = str(component.get('uid', '') or '')
 
             # RZ z kategorii
             rz = None
@@ -67,15 +76,15 @@ def parse_ics(
             przedmiot, nauczyciel, podgrupa = wyodrebnij_dane_z_summary_grupa(summary)
 
             event = {
-                "przedmiot": przedmiot,
-                "od": start_time.isoformat() if hasattr(start_time, "isoformat") else start_time,
-                "do_": end_time.isoformat() if hasattr(end_time, "isoformat") else end_time,
-                "miejsce": location,
+                "subject": przedmiot,
+                "start_time": start_time.isoformat() if hasattr(start_time, "isoformat") else start_time,
+                "end_time": end_time.isoformat() if hasattr(end_time, "isoformat") else end_time,
+                "location": location,
                 "rz": rz,
                 "link_ics_zrodlowy": ics_url,
                 "podgrupa": podgrupa,
                 "uid": uid,
-                "nauczyciel_nazwa": nauczyciel,
+                "teacher_name": nauczyciel,
                 "kod_grupy": kod_grupy,
                 "kierunek_nazwa": kierunek_nazwa,
                 "grupa_id": grupa_id
@@ -92,43 +101,34 @@ def parse_grupa_details(html_content: str) -> Dict[str, Any]:
     """
     Parsuje HTML planu zajęć grupy, wyciągając kod grupy, tryb studiów i semestr.
     """
+    if not html_content:
+        return {}
+
     soup = BeautifulSoup(html_content, 'html.parser')
 
-    # Sekcja: Kod grupy z drugiego H2 (Figma: Nagłówek grupy - np. 21F-ANG-SD23)
+    # Kod grupy z drugiego H2 (np. 21F-ANG-SD23)
     h2_elements = soup.find_all('h2')
     kod_grupy = ""
     if len(h2_elements) >= 2:
-        kod_grupy = h2_elements[1].get_text(strip=True)
+        kod_grupy = h2_elements[1].get_text(strip=True) or ""
 
-    # Sekcja: Informacje z H3 (Figma: Szczegóły kierunku, trybu i semestru)
+    # Informacje z H3
     h3 = soup.find('h3')
     kierunek_nazwa = None
     tryb_studiow = None
     semestr = None
 
     if h3:
-        # Pobierz HTML zawartość H3 i podziel po <br>
         h3_html = str(h3)
-
-        # Podziel zawartość po <br> i <br />
-        import re
         parts = re.split(r'<br\s*/?>', h3_html, flags=re.IGNORECASE)
-
-        # Pierwsza część: nazwa kierunku (przed pierwszym <br>)
         if len(parts) > 0:
-            kierunek_nazwa = BeautifulSoup(parts[0], 'html.parser').get_text(strip=True)
-
-        # Druga część: tryb studiów (po pierwszym <br>)
+            kierunek_nazwa = BeautifulSoup(parts[0], 'html.parser').get_text(strip=True) or None
         if len(parts) > 1:
             druga_czesc = BeautifulSoup(parts[1], 'html.parser').get_text(strip=True)
-
-            # Sprawdź czy zawiera "stacjonarne" czy "niestacjonarne"
             if 'niestacjonarne' in druga_czesc.lower():
                 tryb_studiow = 'niestacjonarne'
             elif 'stacjonarne' in druga_czesc.lower():
                 tryb_studiow = 'stacjonarne'
-
-        # Trzecia część: semestr (po drugim <br>) - tylko słowo "letni" lub "zimowy"
         if len(parts) > 2:
             trzecia_czesc = BeautifulSoup(parts[2], 'html.parser').get_text(strip=True)
             if 'letni' in trzecia_czesc.lower():
@@ -136,11 +136,12 @@ def parse_grupa_details(html_content: str) -> Dict[str, Any]:
             elif 'zimowy' in trzecia_czesc.lower():
                 semestr = 'zimowy'
 
-    print(f"  Parser: kod='{kod_grupy}', tryb='{tryb_studiow}', semestr='{semestr}', kierunek='{kierunek_nazwa}'")
+    # fallback: if kod_grupy empty keep None
+    kod_grupy = kod_grupy or None
 
     return {
         "kod_grupy": kod_grupy,
         "tryb_studiow": tryb_studiow,
         "semestr": semestr,
-        "kierunek_nazwa": kierunek_nazwa
+        "kierunek_nazwa": kierunek_nazwa,
     }

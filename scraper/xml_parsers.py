@@ -89,16 +89,14 @@ def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
     return results
 
 
+# PODMIEŃ TYLKO funkcję parse_groups_from_xml i _normalize_study_mode
+
 def parse_groups_from_xml(
     xml_content: str,
     direction_external_id: Optional[str] = None,
     direction_name: Optional[str] = None,
     faculty: Optional[str] = None,
 ) -> list[XmlGroup]:
-    """
-    Parser listy grup dla kierunku
-    (np. grupy_lista_grup_kierunku.ID=xxx.xml).
-    """
     soup = BeautifulSoup(xml_content, "xml")
     items = soup.find_all(lambda t: t.name and t.name.lower() == "item")
     results: list[XmlGroup] = []
@@ -106,10 +104,21 @@ def parse_groups_from_xml(
     for it in items:
         ext_id = _pick_text(it, ["ID", "GRUPA_ID", "GROUP_ID"])
         code = _pick_text(it, ["KOD", "KOD_GRUPY", "CODE", "GROUP_CODE"])
-        plan_url = _pick_text(it, ["URL", "LINK", "PLAN_URL", "LINK_PLANU"])
-        ics_url = _pick_text(it, ["ICS", "URL_ICS", "LINK_ICS"])
-        mode = _normalize_study_mode(_pick_text(it, ["TRYB", "TRYB_STUDIOW", "MODE"]))
-        sem = _normalize_semester_name(_pick_text(it, ["SEMESTR", "SEMESTER_NAME", "SEMESTR_NAZWA"]))
+        plan_url = _pick_text(it, ["URL", "LINK", "PLAN_URL", "LINK_PLANU", "GROUP_PLAN_URL"])
+        ics_url = _pick_text(it, ["ICS", "URL_ICS", "LINK_ICS", "GROUP_ICS_URL"])
+
+        mode_raw = _pick_text(
+            it,
+            [
+                "TRYB", "TRYB_STUDIOW", "STUDY_MODE", "MODE",
+                "FORMA_STUDIOW", "FORM", "STUDIA_FORMA"
+            ],
+        )
+        mode = _normalize_study_mode(mode_raw)
+
+        sem = _normalize_semester_name(
+            _pick_text(it, ["SEMESTR", "SEMESTER_NAME", "SEMESTR_NAZWA", "SEMESTER"])
+        )
 
         if not ext_id:
             continue
@@ -130,7 +139,6 @@ def parse_groups_from_xml(
             )
         )
     return results
-
 
 def parse_teachers_from_xml(
     xml_content: str,
@@ -260,11 +268,16 @@ def _pick_text(tag: Any, names: list[str]) -> Optional[str]:
 def _normalize_study_mode(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
-    v = value.strip().lower()
-    if "niestac" in v:
+    v = str(value).strip().lower()
+
+    # niestacjonarne
+    if any(x in v for x in ["niestac", "zaoczne", "part-time", "part time", "np", "ns"]):
         return "niestacjonarne"
-    if "stac" in v:
+
+    # stacjonarne
+    if any(x in v for x in ["stac", "dzienne", "full-time", "full time", "sp", "sd"]):
         return "stacjonarne"
+
     return value.strip()
 
 

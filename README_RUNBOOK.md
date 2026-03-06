@@ -1,99 +1,51 @@
-# Scraper UZ – Runbook (MVP)
+# Scraper UZ – Runbook (Catalog Only)
 
-## 1) Dostępne tryby uruchamiania
+## Tryb domyślny: `catalog_only`
 
-Aplikacja korzysta ze zmiennej `SCRAPER_ONLY`.
+`catalog_only`:
+1. `xml_bootstrap` (stan semestru)
+2. `xml_sync` (kierunki, grupy, nauczyciele-katalog)
 
-### Tryby produkcyjne
-- `xml_bootstrap` – odczyt semestru z XML + zapis `semester_state`
-- `xml_sync` – sync kierunków/grup + zajęcia grup + `group_schedule_meta`
-- `teacher_sync` – sync zajęć nauczycieli + `teacher_schedule_meta`
-- `cleanup_only` – dezaktywacja wygasłych rekordów
+> Brak synchronizacji eventów (`zajecia_*`).
 
-### Tryby legacy
-- `kierunki`
-- `grupy`
-- `grupy_zajecia`
-- `teachers`
-
----
-
-## 2) Uruchamianie lokalne (PowerShell)
+## Lokalnie (PowerShell)
 
 ```bash
-$env:SCRAPER_ONLY="xml_bootstrap"; python -m scraper.main
-$env:SCRAPER_ONLY="xml_sync"; python -m scraper.main
-$env:SCRAPER_ONLY="teacher_sync"; python -m scraper.main
-$env:SCRAPER_ONLY="cleanup_only"; python -m scraper.main
-```
-
-Pełny (legacy) pipeline:
-```bash
-Remove-Item Env:SCRAPER_ONLY -ErrorAction SilentlyContinue
+pip install -r .\scraper\requirements.txt
+$env:SCRAPER_ONLY="catalog_only"
 python -m scraper.main
 ```
 
----
+## Szybki smoke test
 
-## 3) Kolejność uruchamiania (zalecana)
-
-1. `xml_bootstrap`
-2. `xml_sync`
-3. `teacher_sync`
-4. `cleanup_only`
-
----
-
-## 4) Workflow GitHub Actions
-
-Workflow: `.github/workflows/run_scraper.yml`
-
-Obsługuje:
-- `workflow_dispatch` (manual)
-- `schedule` (cron)
-
-Sekrety wymagane w repo:
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-
----
-
-## 5) Szybki health-check SQL
-
-```sql
-select count(*) as grupy_count from public.grupy;
-select count(*) as zajecia_grupy_count from public.zajecia_grupy;
-select count(*) as active_group_meta from public.group_schedule_meta where is_active = true;
-
-select count(*) as nauczyciele_count from public.nauczyciele;
-select count(*) as zajecia_nauczyciela_count from public.zajecia_nauczyciela;
-select count(*) as active_teacher_meta from public.teacher_schedule_meta where is_active = true;
+```bash
+$env:SCRAPER_ONLY="xml_sync"
+$env:SMOKE_LIMIT_DIRECTIONS="2"
+$env:SMOKE_LIMIT_GROUPS_PER_DIRECTION="5"
+$env:SKIP_TEACHER_ENRICHMENT="1"
+python -m scraper.main
 ```
 
----
+## Manualne tryby
 
-## 6) Typowe problemy i akcje
+```bash
+$env:SCRAPER_ONLY="xml_bootstrap"; python -m scraper.main
+$env:SCRAPER_ONLY="xml_sync";      python -m scraper.main
+$env:SCRAPER_ONLY="catalog_only";  python -m scraper.main
+```
 
-### A) `XML not found (404)` dla `grupy_lista_grup_kierunku.ID=...`
-To normalne dla node'ów katalogowych (wydziały/foldery).  
-Nie wymaga akcji, jeśli finalnie sync zapisuje grupy/eventy.
+## Health check SQL
 
-### B) `events_saved = 0`
-Sprawdź:
-1. czy grupy/nauczyciele istnieją w DB
-2. czy linki ICS są poprawne
-3. logi workflow (`scraper_run.log` artifact)
+```sql
+select current_semester_id, current_semester_name, updated_at
+from semester_state
+order by updated_at desc;
 
-### C) `null value violates not-null constraint`
-Sprawdź mapowanie payloadu do tabeli oraz wartości domyślne (`tryb_studiow`, FK itd.).
+select count(*) as kierunki_count from public.kierunki;
+select count(*) as grupy_count from public.grupy;
+select count(*) as nauczyciele_count from public.nauczyciele;
 
----
-
-## 7) Operacyjne dobre praktyki
-
-- Nie uruchamiaj równolegle kilku pełnych synców.
-- Po większych zmianach zawsze zrób:
-  - `xml_sync`
-  - `teacher_sync`
-  - health-check SQL
-- Trzymaj artifact logów min. 7 dni.
+select count(*) as grupy_tryb_unknown
+from public.grupy
+where lower(coalesce(tryb_studiow,'')) = 'nieznany';
+```

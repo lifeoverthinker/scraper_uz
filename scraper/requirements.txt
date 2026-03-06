@@ -1,12 +1,7 @@
-# Lista bibliotek Pythona
-
 requests
 beautifulsoup4
 python-dotenv
 supabase
-icalendar
-tqdm
-aiohttp
 lxml
-python-dateutil
+icalendar
 rapidfuzz
