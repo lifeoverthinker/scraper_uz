@@ -1,10 +1,10 @@
-﻿from dotenv import load_dotenv
+from dotenv import load_dotenv
 import hashlib
 import os
 import time
 from pathlib import Path
 from dataclasses import asdict, is_dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from supabase import create_client
@@ -553,3 +553,92 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid_map=None, batch_size=1000):
 
 
 
+
+
+def get_semester_state() -> Optional[Dict[str, Any]]:
+    """Pobiera najnowszy zapis stanu semestru."""
+    try:
+        query = supabase.table("semester_state").select("*")
+        try:
+            query = query.order("updated_at", desc=True)
+        except Exception:
+            pass
+        rows = query.limit(1).execute().data or []
+        return rows[0] if rows else None
+    except Exception as e:
+        print(f"Blad odczytu semester_state: {e}")
+        return None
+
+
+def save_semester_state(state: Dict[str, Any]) -> bool:
+    """Zapisuje stan semestru (update po current_semester_id lub insert)."""
+    if not state:
+        return False
+
+    current_semester_id = _str(state.get("current_semester_id")).strip()
+    if not current_semester_id:
+        return False
+
+    payload = {
+        "current_semester_id": current_semester_id,
+        "current_semester_name": state.get("current_semester_name"),
+        "previous_semester_id": state.get("previous_semester_id"),
+        "previous_semester_name": state.get("previous_semester_name"),
+        "source_url": state.get("source_url"),
+        "generated_at_source": _normalize_timestamp(state.get("generated_at_source")),
+    }
+
+    try:
+        existing = (
+            supabase.table("semester_state")
+            .select("current_semester_id")
+            .eq("current_semester_id", current_semester_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+
+        if existing:
+            supabase.table("semester_state").update(payload).eq("current_semester_id", current_semester_id).execute()
+        else:
+            supabase.table("semester_state").insert(payload).execute()
+        return True
+    except Exception as e:
+        print(f"Blad zapisu semester_state: {e}")
+        return False
+
+
+def save_teacher_schedule_meta(meta_rows, batch_size=500):
+    """Zapisuje metadane harmonogramu nauczyciela (best effort)."""
+    if not meta_rows:
+        return 0
+
+    total = 0
+    for batch in chunks(meta_rows, batch_size):
+        data = []
+        for row in batch:
+            if is_dataclass(row):
+                row = asdict(row)
+            if not row.get("nauczyciel_id"):
+                continue
+            data.append(
+                {
+                    "nauczyciel_id": row.get("nauczyciel_id"),
+                    "semester_id": row.get("semester_id"),
+                    "last_schedule_date": row.get("last_schedule_date"),
+                    "is_active": row.get("is_active", True),
+                    "source_kind": row.get("source_kind") or "ics",
+                }
+            )
+
+        if not data:
+            continue
+
+        try:
+            supabase.table("teacher_schedule_meta").upsert(data, on_conflict="nauczyciel_id,semester_id").execute()
+            total += len(data)
+        except Exception as e:
+            print(f"Blad zapisu teacher_schedule_meta: {e}")
+
+    return total
