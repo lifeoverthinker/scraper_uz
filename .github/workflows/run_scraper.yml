@@ -1,4 +1,4 @@
-﻿name: Run Scraper
+name: Run Scraper
 
 on:
   schedule:
@@ -108,7 +108,7 @@ jobs:
           echo "SCRAPER_EVENTS_XML_FIRST=${SCRAPER_EVENTS_XML_FIRST}" | tee -a scraper_run.log
 
           if [ "${REQ_MODE}" = "events_all" ]; then
-            MODES=("grupy_zajecia" "teachers")
+            MODES=("catalog_only" "grupy_zajecia" "teachers")
           elif [ "${REQ_MODE}" = "full" ] || [ -z "${REQ_MODE}" ]; then
             MODES=("full")
           else
@@ -131,13 +131,8 @@ jobs:
 
           for MODE in "${MODES[@]}"; do
             echo "--- START MODE: ${MODE} ---" | tee -a scraper_run.log
-            if [ "${MODE}" = "full" ]; then
-              unset SCRAPER_ONLY
-              echo "Pelny pipeline (brak SCRAPER_ONLY)" | tee -a scraper_run.log
-            else
-              export SCRAPER_ONLY="${MODE}"
-              echo "SCRAPER_ONLY=${SCRAPER_ONLY}" | tee -a scraper_run.log
-            fi
+            export SCRAPER_ONLY="${MODE}"
+            echo "SCRAPER_ONLY=${SCRAPER_ONLY}" | tee -a scraper_run.log
             python -m scraper.main 2>&1 | tee -a scraper_run.log
             echo "--- END MODE: ${MODE} ---" | tee -a scraper_run.log
           done

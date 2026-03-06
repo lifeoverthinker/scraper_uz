@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import datetime as dt
 
 from scraper.db import (
     save_semester_state,
@@ -17,7 +16,7 @@ from scraper.semester_manager import (
 from scraper.xml_sync import sync_directions_and_groups_from_xml
 
 
-def _cleanup_semester_state_duplicates():
+def _cleanup_semester_state_duplicates() -> None:
     try:
         rows = (
             supabase.table("semester_state")
@@ -42,7 +41,7 @@ def _cleanup_semester_state_duplicates():
         if ids_to_delete:
             supabase.table("semester_state").delete().in_("current_semester_id", ids_to_delete).execute()
     except Exception as e:
-        print(f"⚠️ cleanup semester_state duplicates failed: {e}")
+        print(f"cleanup semester_state duplicates failed: {e}")
 
 
 def _run_xml_bootstrap() -> tuple[bool, str]:
@@ -92,20 +91,46 @@ def _run_xml_bootstrap() -> tuple[bool, str]:
     return switch.switched, switch.reason
 
 
-def _run_xml_sync():
+def _run_xml_sync() -> None:
     print("TRYB: xml_sync (CATALOG ONLY)")
     result = sync_directions_and_groups_from_xml(verbose=True)
-    print(f"✅ XML sync result: {result}")
+    print(f"XML sync result: {result}")
 
 
-def _run_catalog_only():
+def _run_catalog_only() -> None:
     print("TRYB: catalog_only")
     _run_xml_bootstrap()
     _run_xml_sync()
 
 
-def main():
+def _run_group_events() -> None:
+    print("TRYB: grupy_zajecia")
+    from scraper.run_events import main as run_group_events
+
+    run_group_events()
+
+
+def _run_teacher_events() -> None:
+    print("TRYB: teachers")
+    from scraper.teacher_sync import sync_teacher_events_and_meta
+
+    result = sync_teacher_events_and_meta(verbose=True)
+    print(f"Teacher sync result: {result}")
+
+
+def _run_full() -> None:
+    print("TRYB: full")
+    _run_catalog_only()
+    _run_group_events()
+    _run_teacher_events()
+
+
+def main() -> None:
     mode = os.getenv("SCRAPER_ONLY", "").lower().strip()
+
+    if mode in {"full", "all", "pipeline"}:
+        _run_full()
+        return
 
     if mode in {"catalog_only", "catalog", "semester_guard", "guard"}:
         _run_catalog_only()
@@ -115,11 +140,22 @@ def main():
         _run_xml_bootstrap()
         return
 
-    if mode in {"xml_sync", "xml_groups"}:
+    if mode in {"xml_sync", "xml_groups", "kierunki", "grupy"}:
         _run_xml_sync()
         return
 
-    print("Brak SCRAPER_ONLY -> uruchamiam catalog_only domyślnie")
+    if mode in {"grupy_zajecia", "groups_events", "events_groups"}:
+        _run_group_events()
+        return
+
+    if mode in {"teachers", "teacher_events", "nauczyciele"}:
+        _run_teacher_events()
+        return
+
+    if mode:
+        print(f"Nieznany SCRAPER_ONLY='{mode}' -> uruchamiam catalog_only domyslnie")
+    else:
+        print("Brak SCRAPER_ONLY -> uruchamiam catalog_only domyslnie")
     _run_catalog_only()
 
 

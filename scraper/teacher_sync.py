@@ -9,7 +9,7 @@ from scraper.db import (
     save_zajecia_nauczyciela,
     save_teacher_schedule_meta,
 )
-from scraper.ics_updater import pobierz_plan_ics_nauczyciela, parse_ics_file
+from scraper.xml_source import fetch_nauczyciel_plan_events_xml
 
 
 def _extract_external_id(link: Optional[str]) -> Optional[str]:
@@ -39,6 +39,14 @@ def _max_event_date(events: list[dict]) -> Optional[str]:
     return max_d.isoformat() if max_d else None
 
 
+def _pick_semester_id(events: list[dict]) -> Optional[str]:
+    for e in events:
+        sem = e.get("semestr_id") or e.get("semester_id")
+        if sem:
+            return str(sem)
+    return None
+
+
 def sync_teacher_events_and_meta(verbose: bool = True) -> dict:
     page_size = 500
     page = 0
@@ -47,7 +55,7 @@ def sync_teacher_events_and_meta(verbose: bool = True) -> dict:
     meta_rows: list[dict] = []
 
     teachers_total = 0
-    teachers_with_ics = 0
+    teachers_with_events = 0
     teachers_failed = 0
 
     while True:
@@ -68,21 +76,17 @@ def sync_teacher_events_and_meta(verbose: bool = True) -> dict:
 
             teacher_uuid = row.get("id")
             ext_id = _extract_external_id(row.get("link_strony_nauczyciela"))
+
             if not teacher_uuid or not ext_id:
                 teachers_failed += 1
                 continue
 
-            plan = pobierz_plan_ics_nauczyciela(ext_id)
-            if plan.get("status") != "success" or not plan.get("ics_content"):
-                teachers_failed += 1
-                continue
-
-            events = parse_ics_file(plan["ics_content"], link_ics_zrodlowy=plan.get("link_ics_zrodlowy"))
+            events = fetch_nauczyciel_plan_events_xml(ext_id)
             if not events:
                 teachers_failed += 1
                 continue
 
-            teachers_with_ics += 1
+            teachers_with_events += 1
 
             for e in events:
                 e["nauczyciel_id"] = teacher_uuid
@@ -91,10 +95,10 @@ def sync_teacher_events_and_meta(verbose: bool = True) -> dict:
             meta_rows.append(
                 {
                     "nauczyciel_id": teacher_uuid,
-                    "semester_id": "122",  # TODO: docelowo z semester_state
+                    "semester_id": _pick_semester_id(events),
                     "last_schedule_date": _max_event_date(events),
                     "is_active": True,
-                    "source_kind": "ics",
+                    "source_kind": "xml",
                 }
             )
 
@@ -104,12 +108,12 @@ def sync_teacher_events_and_meta(verbose: bool = True) -> dict:
     meta_saved = save_teacher_schedule_meta(meta_rows) if meta_rows else 0
 
     if verbose:
-        print(f"Teacher sync: total={teachers_total}, ok={teachers_with_ics}, failed={teachers_failed}")
+        print(f"Teacher sync: total={teachers_total}, ok={teachers_with_events}, failed={teachers_failed}")
         print(f"Teacher sync: events_saved={events_saved}, meta_saved={meta_saved}")
 
     return {
         "teachers_total": teachers_total,
-        "teachers_with_ics": teachers_with_ics,
+        "teachers_with_events": teachers_with_events,
         "teachers_failed": teachers_failed,
         "teacher_events_saved": events_saved,
         "teacher_meta_saved": meta_saved,
