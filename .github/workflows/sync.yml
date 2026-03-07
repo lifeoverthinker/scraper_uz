@@ -1,8 +1,9 @@
 name: Scraper Sync
 on:
   schedule:
-    - [cite_start]cron: '30 5,9,13,16,21 * * *' # 15 min po generowaniu plików na UZ [cite: 6]
+    - cron: '40 5,9,13,16,21 * * *' # 25 min po generowaniu plików na UZ
   workflow_dispatch:
+
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
