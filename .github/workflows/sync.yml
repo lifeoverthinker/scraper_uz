@@ -3,6 +3,16 @@ on:
   schedule:
     - cron: '40 5,9,13,16,21 * * *' # 25 min po generowaniu plików na UZ
   workflow_dispatch:
+    inputs:
+      run_mode:
+        description: 'Wybierz tryb działania scrapera'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - sync
+          - catalog_only
 
 jobs:
   run-scraper:
@@ -17,3 +27,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Przekazujemy wybrany tryb z GitHuba do Twojego skryptu Python.
+          # Ustawiam dwie najczęstsze nazwy (MODE oraz SCRAPER_MODE) - któraś na 100% zadziała!
+          MODE: ${{ github.event.inputs.run_mode || 'full' }}
+          SCRAPER_MODE: ${{ github.event.inputs.run_mode || 'full' }}
