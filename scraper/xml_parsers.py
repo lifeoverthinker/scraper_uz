@@ -1,16 +1,10 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime, date
 from typing import Any, Optional
 import re
-
 from bs4 import BeautifulSoup
 
-
-# =========================
-# Dataclasses (czytelność)
-# =========================
 
 @dataclass(frozen=True)
 class XmlDirection:
@@ -23,23 +17,9 @@ class XmlDirection:
 class XmlGroup:
     external_id: str
     code: str
-    direction_external_id: Optional[str]
-    direction_name: Optional[str]
-    faculty: Optional[str]
-    group_plan_url: Optional[str]
-    group_ics_url: Optional[str]
-    study_mode: Optional[str]   # stacjonarne / niestacjonarne
-    semester_name: Optional[str]  # letni / zimowy
-
-
-@dataclass(frozen=True)
-class XmlTeacher:
-    external_id: str
-    name: str
-    unit_name: Optional[str]
-    email: Optional[str]
-    teacher_plan_url: Optional[str]
-    teacher_ics_url: Optional[str]
+    direction_external_id: Optional[str] = None
+    study_mode: Optional[str] = None
+    semester_name: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -49,333 +29,139 @@ class XmlScheduleEvent:
     starts_at: Optional[str]
     ends_at: Optional[str]
     room: Optional[str]
-    class_type: Optional[str]  # rz
+    class_type: Optional[str]
     teacher_name: Optional[str]
     groups_label: Optional[str]
     subgroup: Optional[str]
-    raw_dates: list[date]      # z TERMIN_DT
-    last_schedule_date: Optional[date]
-    source_url: Optional[str]
+    id_semestru: Optional[str]
+    raw_dates: list[date]
 
-
-# =========================
-# Public parsery list
-# =========================
 
 def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
-    """
-    Parser dla grupy kierunków (np. grupy_lista_kierunkow.xml).
-    Elastyczny: szuka ITEM i wielu wariantów pól.
-    """
     soup = BeautifulSoup(xml_content, "xml")
-    items = soup.find_all(lambda t: t.name and t.name.lower() == "item")
-    results: list[XmlDirection] = []
+    results = []
 
-    for it in items:
-        ext_id = _pick_text(it, ["ID", "KIERUNEK_ID", "DIRECTION_ID"])
-        name = _pick_text(it, ["NAME", "NAZWA", "KIERUNEK", "DIRECTION_NAME"])
-        faculty = _pick_text(it, ["WYDZIAL", "FACULTY", "JEDNOSTKA", "UNIT_NAME"])
+    # ROOT > ITEMS > ITEM (to są Wydziały)
+    root_items = soup.find("ITEMS")
+    if not root_items: return []
 
-        if not ext_id or not name:
-            continue
+    for faculty_item in root_items.find_all("ITEM", recursive=False):
+        faculty_name = faculty_item.find("NAME").get_text(strip=True) if faculty_item.find("NAME") else ""
 
-        results.append(
-            XmlDirection(
-                external_id=ext_id,
-                name=name,
-                faculty=faculty or "",
-            )
-        )
+        # Wydział > ITEMS > ITEM (to są Kierunki)
+        dir_items_container = faculty_item.find("ITEMS")
+        if dir_items_container:
+            for dir_item in dir_items_container.find_all("ITEM", recursive=False):
+                ext_id = dir_item.find("ID")
+                dir_name = dir_item.find("NAME")
+                if ext_id and dir_name:
+                    results.append(XmlDirection(
+                        external_id=ext_id.get_text(strip=True),
+                        name=dir_name.get_text(strip=True),
+                        faculty=faculty_name  # Tu wstawiamy nazwę wydziału-rodzica
+                    ))
     return results
 
-
-# PODMIEŃ TYLKO funkcję parse_groups_from_xml i _normalize_study_mode
-
-def parse_groups_from_xml(
-    xml_content: str,
-    direction_external_id: Optional[str] = None,
-    direction_name: Optional[str] = None,
-    faculty: Optional[str] = None,
-) -> list[XmlGroup]:
+def parse_groups_from_xml(xml_content: str, direction_external_id: Optional[str] = None) -> list[XmlGroup]:
     soup = BeautifulSoup(xml_content, "xml")
-    items = soup.find_all(lambda t: t.name and t.name.lower() == "item")
-    results: list[XmlGroup] = []
-
+    items = soup.find_all("ITEM")
+    results = []
     for it in items:
-        ext_id = _pick_text(it, ["ID", "GRUPA_ID", "GROUP_ID"])
-        code = _pick_text(it, ["KOD", "KOD_GRUPY", "CODE", "GROUP_CODE"])
-        plan_url = _pick_text(it, ["URL", "LINK", "PLAN_URL", "LINK_PLANU", "GROUP_PLAN_URL"])
-        ics_url = _pick_text(it, ["ICS", "URL_ICS", "LINK_ICS", "GROUP_ICS_URL"])
+        ext_id_tag = it.find("ID")
+        # Log pokazał, że KOD to często NAME w nagłówku, ale w liście to ID lub KOD
+        code_tag = it.find("KOD") or it.find("CODE") or it.find("NAME")
 
-        mode_raw = _pick_text(
-            it,
-            [
-                "TRYB", "TRYB_STUDIOW", "STUDY_MODE", "MODE",
-                "FORMA_STUDIOW", "FORM", "STUDIA_FORMA"
-            ],
-        )
-        mode = _normalize_study_mode(mode_raw)
-
-        sem = _normalize_semester_name(
-            _pick_text(it, ["SEMESTR", "SEMESTER_NAME", "SEMESTR_NAZWA", "SEMESTER"])
-        )
-
-        if not ext_id:
-            continue
-        if not code:
-            code = f"GRUPA-{ext_id}"
-
-        results.append(
-            XmlGroup(
-                external_id=ext_id,
-                code=code,
-                direction_external_id=direction_external_id,
-                direction_name=direction_name,
-                faculty=faculty,
-                group_plan_url=plan_url,
-                group_ics_url=ics_url,
-                study_mode=mode,
-                semester_name=sem,
-            )
-        )
+        if ext_id_tag:
+            results.append(XmlGroup(
+                external_id=ext_id_tag.get_text(strip=True),
+                code=code_tag.get_text(strip=True) if code_tag else f"GRUPA-{ext_id_tag.text}",
+                direction_external_id=direction_external_id
+            ))
     return results
-
-def parse_teachers_from_xml(
-    xml_content: str,
-    unit_name: Optional[str] = None,
-) -> list[XmlTeacher]:
-    """
-    Parser listy nauczycieli dla jednostki
-    (np. nauczyciel_lista_wydzialu.ID=xxx.xml).
-    """
-    soup = BeautifulSoup(xml_content, "xml")
-    items = soup.find_all(lambda t: t.name and t.name.lower() == "item")
-    results: list[XmlTeacher] = []
-
-    for it in items:
-        ext_id = _pick_text(it, ["ID", "NAUCZYCIEL_ID", "TEACHER_ID"])
-        name = _pick_text(it, ["NAME", "NAZWA", "NAUCZYCIEL", "TEACHER_NAME"])
-        email = _pick_text(it, ["EMAIL", "MAIL"])
-        plan_url = _pick_text(it, ["URL", "LINK", "PLAN_URL", "LINK_PLANU"])
-        ics_url = _pick_text(it, ["ICS", "URL_ICS", "LINK_ICS"])
-
-        if not ext_id or not name:
-            continue
-
-        results.append(
-            XmlTeacher(
-                external_id=ext_id,
-                name=name,
-                unit_name=unit_name,
-                email=email,
-                teacher_plan_url=plan_url,
-                teacher_ics_url=ics_url,
-            )
-        )
-    return results
-
-
-# =========================
-# Public parser planów
-# =========================
 
 def parse_group_plan_events(xml_content: str, source_url: Optional[str] = None) -> list[XmlScheduleEvent]:
-    return _parse_plan_events(xml_content=xml_content, source_url=source_url)
+    return _parse_plan_events(xml_content, source_url)
 
 
 def parse_teacher_plan_events(xml_content: str, source_url: Optional[str] = None) -> list[XmlScheduleEvent]:
-    return _parse_plan_events(xml_content=xml_content, source_url=source_url)
+    return _parse_plan_events(xml_content, source_url)
 
 
-# =========================
-# Core parser planu
-# =========================
-
-def _parse_plan_events(xml_content: str, source_url: Optional[str]) -> list[XmlScheduleEvent]:
+def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> list[XmlScheduleEvent]:
     soup = BeautifulSoup(xml_content, "xml")
-    items = soup.find_all(lambda t: t.name and t.name.lower() == "item")
-    out: list[XmlScheduleEvent] = []
+    items = soup.find_all("ITEM")
+    out = []
+
+    # Próba pobrania ID semestru z nagłówka pliku (ROOT) jako fallback
+    root_tag = soup.find("ROOT")
+    header_semester_id = root_tag.find("SEMESTER_ID").get_text(strip=True) if root_tag and root_tag.find(
+        "SEMESTER_ID") else None
 
     for it in items:
-        # Pola spotykane w planach XML
-        uid = _pick_text(it, ["UID", "EVENT_UID", "ID_ZAJEC", "ZAJECIA_ID"]) or _build_fallback_uid(it)
-        subject = _pick_text(it, ["PRZEDMIOT", "NAME", "TYTUL", "SUBJECT"]) or "Brak nazwy"
-        room = _pick_text(it, ["MIEJSCE", "SALA", "ROOM", "LOCATION"])
-        rz = _pick_text(it, ["RZ", "RODZAJ_ZAJEC", "TYPE"])
-        teacher = _pick_text(it, ["NAUCZYCIEL", "PROWADZACY", "TEACHER"])
-        groups_label = _pick_text(it, ["GRUPY", "GROUPS", "GROUP_LABEL"])
-        subgroup = _pick_text(it, ["PODGRUPA", "PG", "SUBGROUP"])
+        # Podstawowe dane
+        uid = it.find("ID_POZYCJA") or it.find("UID")
+        subject = it.find("NAME") or it.find("PRZEDMIOT")
+        if not uid or not subject: continue
 
-        # Czas: preferuj G_OD/G_DO (hh:mm) + daty z TERMIN_DT,
-        # ale zachowaj też OD_GODZ/DO_GODZ gdy brak.
-        g_od = _pick_text(it, ["G_OD", "START_HHMM"])
-        g_do = _pick_text(it, ["G_DO", "END_HHMM"])
-        od_godz = _pick_text(it, ["OD_GODZ", "START_MINUTES"])
-        do_godz = _pick_text(it, ["DO_GODZ", "END_MINUTES"])
+        def get_txt(tag_name):
+            f = it.find(tag_name)
+            return f.get_text(strip=True) if f and f.text else None
 
-        dates = _parse_termin_dt_dates(_pick_text(it, ["TERMIN_DT", "DATES", "TERM_DATES"]))
+        # Dane potwierdzone w PowerShell (Tagi: SORT -> nauczyciel, PG -> podgrupa)
+        teacher = get_txt("SORT")  # W plikach grup SORT zawiera nazwisko nauczyciela
+        subgroup = get_txt("PG")  # W plikach grup PG zawiera podgrupę (np. "Praw")
+        semester_id = get_txt("ID_SEMESTR") or header_semester_id
+
+        # --- Logika Sali ---
+        room = None
+        sale_node = it.find("SALE")
+        if sale_node:
+            room_tag = sale_node.find("NAME")
+            if room_tag:
+                room = room_tag.get_text(strip=True)
+
+        # Fallback: wyciąganie sali z uwag (R_UWAGI), np. "s. 305 A-41"
+        if not room:
+            remarks = get_txt("R_UWAGI")
+            if remarks and "s." in remarks:
+                # Pobieramy tekst po "s. "
+                room = remarks.split("s.")[-1].strip().replace("\n", " ")
+
+        # Czas i Daty
+        g_od_val = get_txt("G_OD")
+        g_do_val = get_txt("G_DO")
+        dates_raw = get_txt("TERMIN_DT")
+
+        dates = []
+        if dates_raw:
+            for d_str in [c.strip() for c in dates_raw.split(";") if c.strip()]:
+                try:
+                    dates.append(datetime.strptime(d_str, "%Y-%m-%d").date())
+                except:
+                    pass
+
         last_date = max(dates) if dates else None
+        starts_at = _compose_datetime_iso(last_date, g_od_val)
+        ends_at = _compose_datetime_iso(last_date, g_do_val)
 
-        starts_at = _compose_datetime_iso(last_date, g_od, od_godz)
-        ends_at = _compose_datetime_iso(last_date, g_do, do_godz)
-
-        out.append(
-            XmlScheduleEvent(
-                external_uid=uid,
-                subject=subject,
-                starts_at=starts_at,
-                ends_at=ends_at,
-                room=room,
-                class_type=rz,
-                teacher_name=teacher,
-                groups_label=groups_label,
-                subgroup=subgroup,
-                raw_dates=dates,
-                last_schedule_date=last_date,
-                source_url=source_url,
-            )
-        )
-
+        out.append(XmlScheduleEvent(
+            external_uid=uid.get_text(strip=True),
+            subject=subject.get_text(strip=True),
+            starts_at=starts_at,
+            ends_at=ends_at,
+            room=room,
+            class_type=get_txt("RZ"),
+            teacher_name=teacher,
+            groups_label=get_txt("SORT"),
+            subgroup=subgroup,
+            id_semestru=semester_id,
+            raw_dates=dates
+        ))
     return out
 
-
-# =========================
-# Helpers
-# =========================
-
-def _pick_text(tag: Any, names: list[str]) -> Optional[str]:
-    # 1) child tag case-insensitive
-    for n in names:
-        found = tag.find(lambda t: t.name and t.name.lower() == n.lower())
-        if found and found.text is not None:
-            val = found.text.strip()
-            if val:
-                return val
-
-    # 2) attributes
-    attrs = getattr(tag, "attrs", {}) or {}
-    attrs_lower = {str(k).lower(): v for k, v in attrs.items()}
-    for n in names:
-        val = attrs_lower.get(n.lower())
-        if val is not None:
-            sval = str(val).strip()
-            if sval:
-                return sval
-
-    return None
-
-
-def _normalize_study_mode(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    v = str(value).strip().lower()
-
-    # niestacjonarne
-    if any(x in v for x in ["niestac", "zaoczne", "part-time", "part time", "np", "ns"]):
-        return "niestacjonarne"
-
-    # stacjonarne
-    if any(x in v for x in ["stac", "dzienne", "full-time", "full time", "sp", "sd"]):
-        return "stacjonarne"
-
-    return value.strip()
-
-
-def _normalize_semester_name(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    v = value.strip().lower()
-    if "let" in v:
-        return "letni"
-    if "zim" in v:
-        return "zimowy"
-    return value.strip()
-
-
-def _parse_termin_dt_dates(raw: Optional[str]) -> list[date]:
-    """
-    TERMIN_DT wg opisu CK: daty oddzielone średnikami.
-    Obsługa najczęstszych formatów:
-    - YYYY-MM-DD
-    - DD.MM.YYYY
-    - YYYYMMDD
-    """
-    if not raw:
-        return []
-    chunks = [c.strip() for c in raw.split(";") if c.strip()]
-    parsed: list[date] = []
-
-    for c in chunks:
-        d = _try_parse_date(c)
-        if d:
-            parsed.append(d)
-
-    return parsed
-
-
-def _try_parse_date(value: str) -> Optional[date]:
-    # YYYY-MM-DD
+def _compose_datetime_iso(d: Optional[date], hhmm: Optional[str]) -> Optional[str]:
+    if not d or not hhmm or ":" not in hhmm: return None
     try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except ValueError:
-        pass
-    # DD.MM.YYYY
-    try:
-        return datetime.strptime(value, "%d.%m.%Y").date()
-    except ValueError:
-        pass
-    # YYYYMMDD
-    if re.fullmatch(r"\d{8}", value):
-        try:
-            return datetime.strptime(value, "%Y%m%d").date()
-        except ValueError:
-            return None
-    return None
-
-
-def _compose_datetime_iso(last_date: Optional[date], hhmm: Optional[str], minutes: Optional[str]) -> Optional[str]:
-    """
-    Składa datetime ISO na bazie:
-    - data = last_date (jeśli jest)
-    - czas = hh:mm albo minuty od północy
-    Jeśli brak daty, zwraca None (nie zgadujemy daty).
-    """
-    if not last_date:
-        return None
-
-    hour = 0
-    minute = 0
-
-    if hhmm and re.fullmatch(r"\d{1,2}:\d{2}", hhmm.strip()):
-        h, m = hhmm.strip().split(":")
-        hour, minute = int(h), int(m)
-    elif minutes and str(minutes).isdigit():
-        total = int(minutes)
-        hour, minute = divmod(total, 60)
-    else:
-        return None
-
-    try:
-        dt = datetime(
-            year=last_date.year,
-            month=last_date.month,
-            day=last_date.day,
-            hour=hour,
-            minute=minute,
-        )
-        return dt.isoformat()
-    except ValueError:
-        return None
-
-
-def _build_fallback_uid(item_tag: Any) -> str:
-    """
-    Awaryjny UID gdy XML go nie ma.
-    """
-    base = (
-        _pick_text(item_tag, ["PRZEDMIOT", "NAME", "SUBJECT"]) or "NO_SUBJECT",
-        _pick_text(item_tag, ["TERMIN_DT", "DATES"]) or "NO_DATE",
-        _pick_text(item_tag, ["G_OD", "START_HHMM", "OD_GODZ"]) or "NO_START",
-        _pick_text(item_tag, ["G_DO", "END_HHMM", "DO_GODZ"]) or "NO_END",
-    )
-    return "XML-" + "|".join(base)
+        h, m = map(int, hhmm.split(":"))
+        return datetime(d.year, d.month, d.day, h, m).isoformat()
+    except: return None

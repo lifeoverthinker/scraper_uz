@@ -1,120 +1,76 @@
-from __future__ import annotations
-
-import datetime as dt
-import re
-from typing import Optional
-
-from scraper.db import (
-    supabase,
-    save_zajecia_nauczyciela,
-    save_teacher_schedule_meta,
-)
-from scraper.xml_source import fetch_nauczyciel_plan_events_xml
+import xml.etree.ElementTree as ET
+from scraper.db import supabase, save_zajecia_nauczyciela
+from scraper.xml_parsers import parse_teacher_plan_events
+from scraper.xml_client import XmlClient
 
 
-def _extract_external_id(link: Optional[str]) -> Optional[str]:
-    if not link:
-        return None
-    m = re.search(r"ID=(\d+)", link)
-    return m.group(1) if m else None
+def sync_teacher_events_and_meta(verbose=True):
+    client = XmlClient()
+    # Pobieramy nauczycieli (potrzebujemy wewnętrznego ID do relacji)
+    res = supabase.table("nauczyciele").select("id, external_id").execute()
+    teachers = res.data or []
 
-
-def _max_event_date(events: list[dict]) -> Optional[str]:
-    max_d = None
-    for e in events:
-        raw = e.get("od")
-        if not raw:
-            continue
-        s = str(raw)
-        d = None
-        try:
-            d = dt.datetime.fromisoformat(s.replace("Z", "+00:00")).date()
-        except Exception:
-            try:
-                d = dt.date.fromisoformat(s[:10])
-            except Exception:
-                d = None
-        if d and (max_d is None or d > max_d):
-            max_d = d
-    return max_d.isoformat() if max_d else None
-
-
-def _pick_semester_id(events: list[dict]) -> Optional[str]:
-    for e in events:
-        sem = e.get("semestr_id") or e.get("semester_id")
-        if sem:
-            return str(sem)
-    return None
-
-
-def sync_teacher_events_and_meta(verbose: bool = True) -> dict:
-    page_size = 500
-    page = 0
-
-    all_events: list[dict] = []
-    meta_rows: list[dict] = []
-
-    teachers_total = 0
-    teachers_with_events = 0
-    teachers_failed = 0
-
-    while True:
-        start = page * page_size
-        end = start + page_size - 1
-        res = (
-            supabase.table("nauczyciele")
-            .select("id,link_strony_nauczyciela")
-            .range(start, end)
-            .execute()
-        )
-        rows = res.data or []
-        if not rows:
-            break
-
-        for row in rows:
-            teachers_total += 1
-
-            teacher_uuid = row.get("id")
-            ext_id = _extract_external_id(row.get("link_strony_nauczyciela"))
-
-            if not teacher_uuid or not ext_id:
-                teachers_failed += 1
-                continue
-
-            events = fetch_nauczyciel_plan_events_xml(ext_id)
-            if not events:
-                teachers_failed += 1
-                continue
-
-            teachers_with_events += 1
-
-            for e in events:
-                e["nauczyciel_id"] = teacher_uuid
-            all_events.extend(events)
-
-            meta_rows.append(
-                {
-                    "nauczyciel_id": teacher_uuid,
-                    "semester_id": _pick_semester_id(events),
-                    "last_schedule_date": _max_event_date(events),
-                    "is_active": True,
-                    "source_kind": "xml",
-                }
-            )
-
-        page += 1
-
-    events_saved = save_zajecia_nauczyciela(all_events) if all_events else 0
-    meta_saved = save_teacher_schedule_meta(meta_rows) if meta_rows else 0
+    total_saved = 0
 
     if verbose:
-        print(f"Teacher sync: total={teachers_total}, ok={teachers_with_events}, failed={teachers_failed}")
-        print(f"Teacher sync: events_saved={events_saved}, meta_saved={meta_saved}")
+        print(f"🔄 Rozpoczynam synchronizację planów dla {len(teachers)} nauczycieli...")
 
-    return {
-        "teachers_total": teachers_total,
-        "teachers_with_events": teachers_with_events,
-        "teachers_failed": teachers_failed,
-        "teacher_events_saved": events_saved,
-        "teacher_meta_saved": meta_saved,
-    }
+    for t in teachers:
+        teacher_uuid = t['id']
+        ext_id = t['external_id']
+        if not ext_id:
+            continue
+
+        # Pobieranie planu przez XmlClient
+        xml_res = client.fetch_xml(f"nauczyciel_plan.ID={ext_id}.xml")
+        if not xml_res.content:
+            continue
+
+        try:
+            root = ET.fromstring(xml_res.content)
+
+            # Zbieranie jednostek organizacyjnych (JEDN1, JEDN2...)
+            jednostki = set()
+            for child in root:
+                if child.tag.startswith("JEDN") and child.text:
+                    jednostki.add(child.text.strip())
+            jednostka_str = " | ".join(jednostki)
+
+            # 1. Aktualizacja danych nauczyciela (email i jednostka)
+            supabase.table("nauczyciele").update({
+                "email": root.findtext("E_MAIL"),
+                "jednostka": jednostka_str
+            }).eq("id", teacher_uuid).execute()
+
+            # 2. Parsowanie zajęć
+            evs = parse_teacher_plan_events(xml_res.content)
+
+            # Przygotowanie payloadu pod polskie kolumny (zgodnie z db.py)
+            payload = []
+            for e in evs:
+                payload.append({
+                    "uid": e.external_uid,
+                    "id_semestru": e.id_semestru,
+                    "starts_at": e.starts_at,
+                    "ends_at": e.ends_at,
+                    "subject": e.subject,
+                    "class_type": e.class_type,
+                    "room": e.room,
+                    "groups_label": e.groups_label
+                })
+
+            # 3. Zapis zajęć (z mechanizmem usuwania nieobecnych w XML)
+            if payload:
+                saved = save_zajecia_nauczyciela(payload, teacher_uuid)
+                total_saved += saved
+                if verbose and saved > 0:
+                    print(f"  [Nauczyciel {ext_id}]: Zapisano {saved} zajęć.")
+
+        except Exception as e:
+            print(f"  [Nauczyciel {ext_id}]: Błąd synchronizacji: {e}")
+
+    return {"status": "ok", "events_saved": total_saved}
+
+
+if __name__ == "__main__":
+    sync_teacher_events_and_meta()
