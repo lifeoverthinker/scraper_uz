@@ -1,7 +1,7 @@
 name: Scraper Sync
 on:
   schedule:
-    - cron: '40 5,9,13,16,21 * * *' # 25 min po generowaniu plików na UZ
+    - cron: '40 5,9,13,16,21 * * *' # 25 min po generowaniu plików (15+25=40)
   workflow_dispatch:
     inputs:
       run_mode:
@@ -22,12 +22,13 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with: {python-version: '3.11'}
-      - run: pip install -r scraper/requirements.txt
-      - run: python -m scraper.main
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+      - name: Run Scraper
+        run: python -m scraper.main
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Przekazujemy wybrany tryb z GitHuba do Twojego skryptu Python.
-          # Ustawiam dwie najczęstsze nazwy (MODE oraz SCRAPER_MODE) - któraś na 100% zadziała!
+          # Przekazujemy tryb wybrany ręcznie LUB 'full' jeśli odpala automat
           MODE: ${{ github.event.inputs.run_mode || 'full' }}
           SCRAPER_MODE: ${{ github.event.inputs.run_mode || 'full' }}
