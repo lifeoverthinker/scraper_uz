@@ -17,6 +17,9 @@ on:
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
+    env:
+      # Ustawiamy globalną zmienną dla całego joba
+      SCRAPER_MODE: ${{ github.event.inputs.run_mode || 'full' }}
     steps:
       - uses: actions/checkout@v3
       - name: Setup Python
@@ -29,6 +32,6 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Przekazujemy tryb wybrany ręcznie LUB 'full' jeśli odpala automat
-          MODE: ${{ github.event.inputs.run_mode || 'full' }}
-          SCRAPER_MODE: ${{ github.event.inputs.run_mode || 'full' }}
+          SCRAPER_ONLY: ${{ env.SCRAPER_MODE }}   # <-- dodaj tę linię
+          MODE: ${{ env.SCRAPER_MODE }}
+          SCRAPER_MODE: ${{ env.SCRAPER_MODE }}
