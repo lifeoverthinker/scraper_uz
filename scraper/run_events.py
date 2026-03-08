@@ -14,31 +14,39 @@ def main():
 
     for row in grupy:
         gid = row['grupa_id']
-        # Pobieranie XML z planem grupy
-        xml_res = client.fetch_xml(f"grupy_plan.ID={gid}.xml")
-        if not xml_res.content:
-            continue
+        all_events_for_group = []  # Tutaj zbieramy WSZYSTKIE zajęcia (przyszłe i przeszłe)
 
-        try:
-            root = ET.fromstring(xml_res.content)
+        # Iterujemy przez plan bieżący oraz historyczny dla grupy
+        for file_prefix in ["grupy_plan", "grupy_hplan"]:
+            xml_res = client.fetch_xml(f"{file_prefix}.ID={gid}.xml")
+            if not xml_res.content:
+                continue
 
-            # 1. Szybka aktualizacja metadanych grupy (tryb i semestr)
-            supabase.table("grupy").update({
-                "tryb": root.findtext("STUDIA_SYST"),
-                "semestr": root.findtext("SEMESTER")
-            }).eq("grupa_id", gid).execute()
+            try:
+                root = ET.fromstring(xml_res.content)
 
-            # 2. Parsowanie zdarzeń z XML
-            events = parse_group_plan_events(xml_res.content)
+                # 1. Szybka aktualizacja metadanych grupy (tryb i semestr) z głównego planu
+                if file_prefix == "grupy_plan":
+                    supabase.table("grupy").update({
+                        "tryb": root.findtext("STUDIA_SYST"),
+                        "semestr": root.findtext("SEMESTER")
+                    }).eq("grupa_id", gid).execute()
 
-            # 3. Zapis do bazy (przekazujemy gid bezpośrednio do nowej funkcji)
-            saved = save_zajecia_grupy(events, gid)
+                # 2. Parsowanie zdarzeń z XML i dodawanie do wspólnej listy
+                events = parse_group_plan_events(xml_res.content)
+                all_events_for_group.extend(events)
 
-            if saved > 0:
-                print(f"  [Grupa {gid}]: Zsynchronizowano {saved} zajęć.")
+            except Exception as e:
+                print(f"Błąd przetwarzania {file_prefix} dla grupy {gid}: {e}")
 
-        except Exception as e:
-            print(f"  [Grupa {gid}]: Błąd synchronizacji: {e}")
+        # 3. Zapis do bazy - TYLKO RAZ DLA GRUPY (połączony plan + hplan)
+        if all_events_for_group:
+            try:
+                saved = save_zajecia_grupy(all_events_for_group, gid)
+                if saved > 0:
+                    print(f"  [SUKCES] Zapisano łącznie {saved} zajęć (plan + hplan) dla grupy {gid}")
+            except Exception as e:
+                print(f"  [BŁĄD ZAPISU] Nie udało się zapisać zajęć dla grupy {gid}: {e}")
 
 
 if __name__ == "__main__":

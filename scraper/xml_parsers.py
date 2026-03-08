@@ -62,6 +62,7 @@ def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
                     ))
     return results
 
+
 def parse_groups_from_xml(xml_content: str, direction_external_id: Optional[str] = None) -> list[XmlGroup]:
     soup = BeautifulSoup(xml_content, "xml")
     items = soup.find_all("ITEM")
@@ -79,6 +80,7 @@ def parse_groups_from_xml(xml_content: str, direction_external_id: Optional[str]
             ))
     return results
 
+
 def parse_group_plan_events(xml_content: str, source_url: Optional[str] = None) -> list[XmlScheduleEvent]:
     return _parse_plan_events(xml_content, source_url)
 
@@ -94,23 +96,23 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
 
     # Próba pobrania ID semestru z nagłówka pliku (ROOT) jako fallback
     root_tag = soup.find("ROOT")
-    header_semester_id = root_tag.find("SEMESTER_ID").get_text(strip=True) if root_tag and root_tag.find(
-        "SEMESTER_ID") else None
+    header_semester_id = root_tag.find("SEMESTER_ID").get_text(strip=True) if root_tag and root_tag.find("SEMESTER_ID") else None
 
     for it in items:
         # Podstawowe dane
-        uid = it.find("ID_POZYCJA") or it.find("UID")
-        subject = it.find("NAME") or it.find("PRZEDMIOT")
-        if not uid or not subject: continue
+        uid_tag = it.find("ID_POZYCJA") or it.find("UID")
+        subject_tag = it.find("NAME") or it.find("PRZEDMIOT")
+        if not uid_tag or not subject_tag: continue
 
         def get_txt(tag_name):
             f = it.find(tag_name)
             return f.get_text(strip=True) if f and f.text else None
 
-        # Dane potwierdzone w PowerShell (Tagi: SORT -> nauczyciel, PG -> podgrupa)
+        # Dane potwierdzone w PowerShell
         teacher = get_txt("SORT")  # W plikach grup SORT zawiera nazwisko nauczyciela
         subgroup = get_txt("PG")  # W plikach grup PG zawiera podgrupę (np. "Praw")
         semester_id = get_txt("ID_SEMESTR") or header_semester_id
+        class_type = get_txt("RZ")
 
         # --- Logika Sali ---
         room = None
@@ -132,32 +134,33 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
         g_do_val = get_txt("G_DO")
         dates_raw = get_txt("TERMIN_DT")
 
-        dates = []
         if dates_raw:
+            # KLUCZOWA ZMIANA: Pętla po wszystkich datach połączonych średnikami
             for d_str in [c.strip() for c in dates_raw.split(";") if c.strip()]:
                 try:
-                    dates.append(datetime.strptime(d_str, "%Y-%m-%d").date())
-                except:
-                    pass
+                    current_date = datetime.strptime(d_str, "%Y-%m-%d").date()
+                    starts_at = _compose_datetime_iso(current_date, g_od_val)
+                    ends_at = _compose_datetime_iso(current_date, g_do_val)
 
-        last_date = max(dates) if dates else None
-        starts_at = _compose_datetime_iso(last_date, g_od_val)
-        ends_at = _compose_datetime_iso(last_date, g_do_val)
+                    out.append(XmlScheduleEvent(
+                        # Tworzymy unikalne ID łącząc oryginalne UID z datą
+                        external_uid=f"{uid_tag.get_text(strip=True)}_{d_str}",
+                        subject=subject_tag.get_text(strip=True),
+                        starts_at=starts_at,
+                        ends_at=ends_at,
+                        room=room,
+                        class_type=class_type,
+                        teacher_name=teacher,
+                        groups_label=get_txt("SORT"),
+                        subgroup=subgroup,
+                        id_semestru=semester_id,
+                        raw_dates=[current_date]
+                    ))
+                except Exception:
+                    continue
 
-        out.append(XmlScheduleEvent(
-            external_uid=uid.get_text(strip=True),
-            subject=subject.get_text(strip=True),
-            starts_at=starts_at,
-            ends_at=ends_at,
-            room=room,
-            class_type=get_txt("RZ"),
-            teacher_name=teacher,
-            groups_label=get_txt("SORT"),
-            subgroup=subgroup,
-            id_semestru=semester_id,
-            raw_dates=dates
-        ))
     return out
+
 
 def _compose_datetime_iso(d: Optional[date], hhmm: Optional[str]) -> Optional[str]:
     if not d or not hhmm or ":" not in hhmm: return None
