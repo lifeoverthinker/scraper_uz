@@ -37,6 +37,35 @@ class XmlScheduleEvent:
     raw_dates: list[date]
 
 
+def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
+    """
+    Zamienia format 'Nazwisko Imię, tytuły' (np. z tagu SORT)
+    na 'tytuły Imię Nazwisko' używany w tabeli nauczyciele.
+    """
+    if not raw_name or raw_name.lower() == "brak":
+        return None
+
+    # Dzielimy tekst po PIERWSZYM przecinku
+    # Dla "Sztyber Radosław, dr hab., prof. UZ"
+    # parts[0] = "Sztyber Radosław", parts[1] = " dr hab., prof. UZ"
+    parts = raw_name.split(',', 1)
+
+    imie_nazwisko_part = parts[0].strip()
+    tytuly_part = parts[1].strip() if len(parts) > 1 else ""
+
+    # Odwracanie "Nazwisko Imię" -> "Imię Nazwisko"
+    name_tokens = imie_nazwisko_part.split()
+    if len(name_tokens) > 1:
+        # name_tokens[0] to nazwisko, reszta (np. name_tokens[1:]) to imiona
+        imie_nazwisko = " ".join(name_tokens[1:]) + " " + name_tokens[0]
+    else:
+        imie_nazwisko = imie_nazwisko_part
+
+    # Składamy wszystko w jedną całość (Tytuły + Imię + Nazwisko)
+    if tytuly_part:
+        return f"{tytuly_part} {imie_nazwisko}"
+    return imie_nazwisko
+
 def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
     soup = BeautifulSoup(xml_content, "xml")
     results = []
