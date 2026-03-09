@@ -190,7 +190,23 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
                 except Exception:
                     continue
 
-    return out
+        else:
+            # Zajęcia zaplanowane, ale bez podanej daty (np. "do ustalenia")
+            out.append(XmlScheduleEvent(
+                external_uid=uid_tag.get_text(strip=True),
+                subject=subject_tag.get_text(strip=True),
+                starts_at=None,
+                ends_at=None,
+                room=room,
+                class_type=class_type,
+                teacher_name=teacher,
+                groups_label=get_txt("SORT"),
+                subgroup=subgroup,
+                id_semestru=semester_id,
+                raw_dates=[]
+            ))
+
+        return out
 
 
 def _compose_datetime_iso(d: Optional[date], hhmm: Optional[str]) -> Optional[str]:

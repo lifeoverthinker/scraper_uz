@@ -108,11 +108,15 @@ def save_zajecia_grupy(events, grupa_id_target: str):
     Zapisuje zajęcia grupy, aktualizuje zmienione dane (np. sala)
     oraz usuwa zajęcia, które zostały odwołane (zniknęły z XML).
     """
+
     if not events:
         return 0
 
+    # USUNIĘTO: supabase.table("zajecia_grupy").delete().lt("koniec", "now()").execute()
+
     batch_data = []
     seen_uids = set()
+
 
     for e in events:
         if is_dataclass(e):
@@ -134,7 +138,7 @@ def save_zajecia_grupy(events, grupa_id_target: str):
             "rodzaj_zajec": e.get("class_type"),
             "sala": e.get("room"),
             "nauczyciel": e.get("teacher_name"),
-            "podgrupa": (e.get("subgroup") or "")[:20],
+            "podgrupa": e.get("subgroup")[:20] if e.get("subgroup") else None,
             "grupa_id": grupa_id_target
         })
 
@@ -156,7 +160,7 @@ def save_zajecia_grupy(events, grupa_id_target: str):
 
 def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
     if not events: return 0
-    supabase.table("zajecia_nauczyciela").delete().lt("koniec", "now()").execute()
+    # USUNIĘTO: supabase.table("zajecia_nauczyciela").delete().lt("koniec", "now()").execute()
 
     seen_uids = set()
     batch_data = []
@@ -166,7 +170,7 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
         poczatek = _normalize_timestamp(e.get("starts_at") or e.get("od"))
         koniec = _normalize_timestamp(e.get("ends_at") or e.get("do_"))
 
-        if not uid or not poczatek or not koniec: continue
+        if not uid: continue
         if uid in seen_uids: continue
 
         seen_uids.add(uid)
