@@ -138,7 +138,9 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
             return f.get_text(strip=True) if f and f.text else None
 
         # Dane potwierdzone w PowerShell
-        teacher = get_txt("SORT")  # W plikach grup SORT zawiera nazwisko nauczyciela
+        raw_teacher = get_txt("SORT")  # W plikach grup SORT zawiera nazwisko nauczyciela
+        teacher = _format_teacher_name(raw_teacher)  # Formatowanie do 'Tytuł Imię Nazwisko'
+
         subgroup = get_txt("PG")  # W plikach grup PG zawiera podgrupę (np. "Praw")
         semester_id = get_txt("ID_SEMESTR") or header_semester_id
         class_type = get_txt("RZ")
