@@ -111,9 +111,6 @@ def save_zajecia_grupy(events, grupa_id_target: str):
     if not events:
         return 0
 
-    # 1. Czyszczenie starych, zakończonych zajęć (higiena bazy)
-    supabase.table("zajecia_grupy").delete().lt("koniec", "now()").execute()
-
     batch_data = []
     seen_uids = set()
 
