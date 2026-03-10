@@ -125,7 +125,8 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
 
     # Próba pobrania ID semestru z nagłówka pliku (ROOT) jako fallback
     root_tag = soup.find("ROOT")
-    header_semester_id = root_tag.find("SEMESTER_ID").get_text(strip=True) if root_tag and root_tag.find("SEMESTER_ID") else None
+    header_semester_id = root_tag.find("SEMESTER_ID").get_text(strip=True) if root_tag and root_tag.find(
+        "SEMESTER_ID") else None
 
     for it in items:
         # Podstawowe dane
@@ -137,11 +138,10 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
             f = it.find(tag_name)
             return f.get_text(strip=True) if f and f.text else None
 
-        # Dane potwierdzone w PowerShell
-        raw_teacher = get_txt("SORT")  # W plikach grup SORT zawiera nazwisko nauczyciela
-        teacher = _format_teacher_name(raw_teacher)  # Formatowanie do 'Tytuł Imię Nazwisko'
+        raw_teacher = get_txt("SORT")
+        teacher = _format_teacher_name(raw_teacher)
 
-        subgroup = get_txt("PG")  # W plikach grup PG zawiera podgrupę (np. "Praw")
+        subgroup = get_txt("PG")
         semester_id = get_txt("ID_SEMESTR") or header_semester_id
         class_type = get_txt("RZ")
 
@@ -153,11 +153,9 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
             if room_tag:
                 room = room_tag.get_text(strip=True)
 
-        # Fallback: wyciąganie sali z uwag (R_UWAGI), np. "s. 305 A-41"
         if not room:
             remarks = get_txt("R_UWAGI")
             if remarks and "s." in remarks:
-                # Pobieramy tekst po "s. "
                 room = remarks.split("s.")[-1].strip().replace("\n", " ")
 
         # Czas i Daty
@@ -166,16 +164,17 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
         dates_raw = get_txt("TERMIN_DT")
 
         if dates_raw:
-            # KLUCZOWA ZMIANA: Pętla po wszystkich datach połączonych średnikami
             for d_str in [c.strip() for c in dates_raw.split(";") if c.strip()]:
                 try:
                     current_date = datetime.strptime(d_str, "%Y-%m-%d").date()
                     starts_at = _compose_datetime_iso(current_date, g_od_val)
                     ends_at = _compose_datetime_iso(current_date, g_do_val)
 
+                    # Zapobiegawcze rozbudowanie UID o podgrupę (na przyszłość)
+                    safe_subgroup = (subgroup or "ALL").replace(" ", "_")
+
                     out.append(XmlScheduleEvent(
-                        # Tworzymy unikalne ID łącząc oryginalne UID z datą
-                        external_uid=f"{uid_tag.get_text(strip=True)}_{d_str}",
+                        external_uid=f"{uid_tag.get_text(strip=True)}_{d_str}_{safe_subgroup}",
                         subject=subject_tag.get_text(strip=True),
                         starts_at=starts_at,
                         ends_at=ends_at,
@@ -187,11 +186,11 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
                         id_semestru=semester_id,
                         raw_dates=[current_date]
                     ))
-                except Exception:
+                except Exception as e:
+                    print(f"Ignoruję wadliwą datę w zajęciach {uid_tag.get_text(strip=True)}: {e}")
                     continue
 
         else:
-            # Zajęcia zaplanowane, ale bez podanej daty (np. "do ustalenia")
             out.append(XmlScheduleEvent(
                 external_uid=uid_tag.get_text(strip=True),
                 subject=subject_tag.get_text(strip=True),
@@ -206,8 +205,8 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
                 raw_dates=[]
             ))
 
-        return out
-
+    # WCIĘCIE POPRAWIONE: Return znajduje się POZA pętlą 'for it in items:'
+    return out
 
 def _compose_datetime_iso(d: Optional[date], hhmm: Optional[str]) -> Optional[str]:
     if not d or not hhmm or ":" not in hhmm: return None
