@@ -134,22 +134,27 @@ def save_zajecia_grupy(events, grupa_id_target: str):
         })
 
     if batch_data:
-        for b in chunks(batch_data, 500):
-            supabase.table("zajecia_grupy").upsert(b, on_conflict="uid").execute()
+        for b in chunks(batch_data, 200): # Zmniejszono z 500 na 200 dla stabilności
+            try:
+                supabase.table("zajecia_grupy").upsert(b, on_conflict="uid").execute()
+            except Exception as e:
+                print(f"Błąd upsert grupy {grupa_id_target}: {e}")
 
-    # ZMIANA: Bezpieczne usuwanie starych zajęć w paczkach (zabezpiecza przed błędem 400 Bad Request)
     if seen_uids:
-        res = supabase.table("zajecia_grupy").select("uid") \
-            .eq("grupa_id", grupa_id_target) \
-            .gt("poczatek", "now()") \
-            .execute()
+        try:
+            res = supabase.table("zajecia_grupy").select("uid") \
+                .eq("grupa_id", grupa_id_target) \
+                .gt("poczatek", "now()") \
+                .execute()
 
-        future_uids_in_db = [row["uid"] for row in (res.data or [])]
-        uids_to_delete = [uid for uid in future_uids_in_db if uid not in seen_uids]
+            future_uids_in_db = [row["uid"] for row in (res.data or [])]
+            uids_to_delete = [uid for uid in future_uids_in_db if uid not in seen_uids]
 
-        if uids_to_delete:
-            for chunk in chunks(uids_to_delete, 100):
-                supabase.table("zajecia_grupy").delete().in_("uid", chunk).execute()
+            if uids_to_delete:
+                for chunk in chunks(uids_to_delete, 50): # Zmniejszono na 50
+                    supabase.table("zajecia_grupy").delete().in_("uid", chunk).execute()
+        except Exception as e:
+            print(f"Błąd czyszczenia zajęć grupy {grupa_id_target}: {e}")
 
     return len(batch_data)
 
@@ -186,21 +191,27 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
             "nauczyciel_id": nauczyciel_uuid
         })
 
-    for b in chunks(batch_data, 500):
-        supabase.table("zajecia_nauczyciela").upsert(b, on_conflict="uid").execute()
+    if batch_data:
+        for b in chunks(batch_data, 200): # Zmniejszono z 500 na 200
+            try:
+                supabase.table("zajecia_nauczyciela").upsert(b, on_conflict="uid").execute()
+            except Exception as e:
+                print(f"Błąd upsert nauczyciela {nauczyciel_uuid}: {e}")
 
-    # ZMIANA: Bezpieczne usuwanie starych zajęć w paczkach (zabezpiecza przed błędem 400 Bad Request)
     if seen_uids:
-        res = supabase.table("zajecia_nauczyciela").select("uid") \
-            .eq("nauczyciel_id", nauczyciel_uuid) \
-            .gt("poczatek", "now()") \
-            .execute()
+        try:
+            res = supabase.table("zajecia_nauczyciela").select("uid") \
+                .eq("nauczyciel_id", nauczyciel_uuid) \
+                .gt("poczatek", "now()") \
+                .execute()
 
-        future_uids_in_db = [row["uid"] for row in (res.data or [])]
-        uids_to_delete = [uid for uid in future_uids_in_db if uid not in seen_uids]
+            future_uids_in_db = [row["uid"] for row in (res.data or [])]
+            uids_to_delete = [uid for uid in future_uids_in_db if uid not in seen_uids]
 
-        if uids_to_delete:
-            for chunk in chunks(uids_to_delete, 100):
-                supabase.table("zajecia_nauczyciela").delete().in_("uid", chunk).execute()
+            if uids_to_delete:
+                for chunk in chunks(uids_to_delete, 50): # Zmniejszono na 50
+                    supabase.table("zajecia_nauczyciela").delete().in_("uid", chunk).execute()
+        except Exception as e:
+            print(f"Błąd czyszczenia zajęć nauczyciela {nauczyciel_uuid}: {e}")
 
     return len(batch_data)
