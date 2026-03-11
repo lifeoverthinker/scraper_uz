@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Any, Optional
 import re
 from bs4 import BeautifulSoup
@@ -46,8 +46,6 @@ def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
         return None
 
     # Dzielimy tekst po PIERWSZYM przecinku
-    # Dla "Sztyber Radosław, dr hab., prof. UZ"
-    # parts[0] = "Sztyber Radosław", parts[1] = " dr hab., prof. UZ"
     parts = raw_name.split(',', 1)
 
     imie_nazwisko_part = parts[0].strip()
@@ -56,12 +54,10 @@ def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
     # Odwracanie "Nazwisko Imię" -> "Imię Nazwisko"
     name_tokens = imie_nazwisko_part.split()
     if len(name_tokens) > 1:
-        # name_tokens[0] to nazwisko, reszta (np. name_tokens[1:]) to imiona
         imie_nazwisko = " ".join(name_tokens[1:]) + " " + name_tokens[0]
     else:
         imie_nazwisko = imie_nazwisko_part
 
-    # Składamy wszystko w jedną całość (Tytuły + Imię + Nazwisko)
     if tytuly_part:
         return f"{tytuly_part} {imie_nazwisko}"
     return imie_nazwisko
@@ -70,14 +66,12 @@ def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
     soup = BeautifulSoup(xml_content, "xml")
     results = []
 
-    # ROOT > ITEMS > ITEM (to są Wydziały)
     root_items = soup.find("ITEMS")
     if not root_items: return []
 
     for faculty_item in root_items.find_all("ITEM", recursive=False):
         faculty_name = faculty_item.find("NAME").get_text(strip=True) if faculty_item.find("NAME") else ""
 
-        # Wydział > ITEMS > ITEM (to są Kierunki)
         dir_items_container = faculty_item.find("ITEMS")
         if dir_items_container:
             for dir_item in dir_items_container.find_all("ITEM", recursive=False):
@@ -87,7 +81,7 @@ def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
                     results.append(XmlDirection(
                         external_id=ext_id.get_text(strip=True),
                         name=dir_name.get_text(strip=True),
-                        faculty=faculty_name  # Tu wstawiamy nazwę wydziału-rodzica
+                        faculty=faculty_name
                     ))
     return results
 
@@ -98,7 +92,6 @@ def parse_groups_from_xml(xml_content: str, direction_external_id: Optional[str]
     results = []
     for it in items:
         ext_id_tag = it.find("ID")
-        # Log pokazał, że KOD to często NAME w nagłówku, ale w liście to ID lub KOD
         code_tag = it.find("KOD") or it.find("CODE") or it.find("NAME")
 
         if ext_id_tag:
@@ -123,13 +116,11 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
     items = soup.find_all("ITEM")
     out = []
 
-    # Próba pobrania ID semestru z nagłówka pliku (ROOT) jako fallback
     root_tag = soup.find("ROOT")
     header_semester_id = root_tag.find("SEMESTER_ID").get_text(strip=True) if root_tag and root_tag.find(
         "SEMESTER_ID") else None
 
     for it in items:
-        # Podstawowe dane
         uid_tag = it.find("ID_POZYCJA") or it.find("UID")
         subject_tag = it.find("NAME") or it.find("PRZEDMIOT")
         if not uid_tag or not subject_tag: continue
@@ -158,19 +149,25 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
             if remarks and "s." in remarks:
                 room = remarks.split("s.")[-1].strip().replace("\n", " ")
 
-        # Czas i Daty
+        # --- Czas i Daty ---
         g_od_val = get_txt("G_OD")
         g_do_val = get_txt("G_DO")
         dates_raw = get_txt("TERMIN_DT")
+        dzien_val = get_txt("DZIEN")
+
+        # UZ XML: DZIEN to 1=Poniedziałek, 2=Wtorek itd. Odejmujemy 1, by uzyskać przesunięcie (0 dla Poniedziałku)
+        day_offset = int(dzien_val) - 1 if dzien_val and dzien_val.isdigit() else 0
 
         if dates_raw:
             for d_str in [c.strip() for c in dates_raw.split(";") if c.strip()]:
                 try:
-                    current_date = datetime.strptime(d_str, "%Y-%m-%d").date()
+                    # Dodajemy day_offset do daty (która domyślnie jest poniedziałkiem danego tygodnia)
+                    base_date = datetime.strptime(d_str, "%Y-%m-%d").date()
+                    current_date = base_date + timedelta(days=day_offset)
+
                     starts_at = _compose_datetime_iso(current_date, g_od_val)
                     ends_at = _compose_datetime_iso(current_date, g_do_val)
 
-                    # Zapobiegawcze rozbudowanie UID o podgrupę (na przyszłość)
                     safe_subgroup = (subgroup or "ALL").replace(" ", "_")
 
                     out.append(XmlScheduleEvent(
@@ -205,7 +202,6 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
                 raw_dates=[]
             ))
 
-    # WCIĘCIE POPRAWIONE: Return znajduje się POZA pętlą 'for it in items:'
     return out
 
 def _compose_datetime_iso(d: Optional[date], hhmm: Optional[str]) -> Optional[str]:
