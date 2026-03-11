@@ -39,21 +39,22 @@ class XmlScheduleEvent:
 
 def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
     """
-    Zamienia format 'Nazwisko Imię, tytuły' (np. z tagu SORT)
-    na 'tytuły Imię Nazwisko' używany w tabeli nauczyciele.
+    Poprawiona wersja: Czyści nazwisko z nadmiarowych spacji i tytułów,
+    zachowując format 'tytuły Imię Nazwisko'.
     """
     if not raw_name or raw_name.lower() == "brak":
         return None
 
-    # Dzielimy tekst po PIERWSZYM przecinku
-    parts = raw_name.split(',', 1)
+    # Czyścimy z tagów HTML jeśli by wystąpiły i nadmiaru białych znaków
+    raw_name = re.sub(r'\s+', ' ', raw_name).strip()
 
+    parts = raw_name.split(',', 1)
     imie_nazwisko_part = parts[0].strip()
     tytuly_part = parts[1].strip() if len(parts) > 1 else ""
 
-    # Odwracanie "Nazwisko Imię" -> "Imię Nazwisko"
     name_tokens = imie_nazwisko_part.split()
     if len(name_tokens) > 1:
+        # Obsługa nazwisk dwuczłonowych: ostatni token to nazwisko, reszta to imiona
         imie_nazwisko = " ".join(name_tokens[1:]) + " " + name_tokens[0]
     else:
         imie_nazwisko = imie_nazwisko_part
@@ -61,7 +62,6 @@ def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
     if tytuly_part:
         return f"{tytuly_part} {imie_nazwisko}"
     return imie_nazwisko
-
 
 def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
     soup = BeautifulSoup(xml_content, "xml")
