@@ -67,18 +67,22 @@ def sync_teacher_events_and_meta(verbose=True):
         if all_events_for_teacher or jednostki:
             jednostka_str = " | ".join(jednostki)
 
-            # 1. Aktualizacja danych nauczyciela (email i jednostka)
-            supabase.table("nauczyciele").update({
-                "email": teacher_email,
-                "jednostka": jednostka_str
-            }).eq("id", teacher_uuid).execute()
+            try:
+                # 1. Aktualizacja danych nauczyciela (email i jednostka)
+                supabase.table("nauczyciele").update({
+                    "email": teacher_email,
+                    "jednostka": jednostka_str
+                }).eq("id", teacher_uuid).execute()
 
-            # 2. Zapis zajęć (z mechanizmem usuwania nieobecnych w XML)
-            if all_events_for_teacher:
-                saved = save_zajecia_nauczyciela(all_events_for_teacher, teacher_uuid)
-                total_saved += saved
-                if verbose and saved > 0:
-                    print(f"  [Nauczyciel {ext_id}]: Zapisano {saved} zajęć (plan + hplan).")
+                # 2. Zapis zajęć (z mechanizmem usuwania nieobecnych w XML)
+                if all_events_for_teacher:
+                    saved = save_zajecia_nauczyciela(all_events_for_teacher, teacher_uuid)
+                    total_saved += saved
+                    if verbose and saved > 0:
+                        print(f"  [Nauczyciel {ext_id}]: Zapisano {saved} zajęć (plan + hplan).")
+            
+            except Exception as db_err:
+                print(f"  [Nauczyciel {ext_id}]: ⚠️ Błąd zapisu do bazy Supabase (przeciążenie): {db_err}")
 
     return {"status": "ok", "events_saved": total_saved}
 
