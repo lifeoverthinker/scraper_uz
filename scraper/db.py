@@ -108,22 +108,28 @@ def save_zajecia_grupy(events, grupa_id_target: str):
     Zapisuje zajęcia grupy, aktualizuje zmienione dane (np. sala)
     oraz usuwa zajęcia, które zostały odwołane (zniknęły z XML).
     """
-
     if not events:
         return 0
 
-    # USUNIĘTO: supabase.table("zajecia_grupy").delete().lt("koniec", "now()").execute()
-
     batch_data = []
     seen_uids = set()
-
 
     for e in events:
         if is_dataclass(e):
             e = asdict(e)
 
-        uid = e.get("external_uid") or e.get("uid")
-        if not uid or uid in seen_uids:
+        # Pobieramy bazowy UID z parsera XML
+        base_uid = e.get("external_uid") or e.get("uid")
+        if not base_uid:
+            continue
+
+        # ==========================================================
+        # KLUCZOWA ZMIANA: Prefiksujemy UID identyfikatorem grupy!
+        # Zapobiega to nadpisywaniu wykładów przez inne grupy.
+        # ==========================================================
+        uid = f"{grupa_id_target}_{base_uid}"
+
+        if uid in seen_uids:
             continue
 
         seen_uids.add(uid)
@@ -142,13 +148,12 @@ def save_zajecia_grupy(events, grupa_id_target: str):
             "grupa_id": grupa_id_target
         })
 
-    # 2. Upsert danych (Aktualizacja jeśli UID już istnieje - to odpali Webhooka przy zmianie sali)
+    # 2. Upsert danych (Aktualizacja jeśli UID już istnieje)
     if batch_data:
         for b in chunks(batch_data, 500):
             supabase.table("zajecia_grupy").upsert(b, on_conflict="uid").execute()
 
     # 3. USUWANIE ODWOŁANYCH ZAJĘĆ
-    # Jeśli zajęcia są w bazie jako "przyszłe", ale nie ma ich w obecnym XML - usuwamy je.
     if seen_uids:
         supabase.table("zajecia_grupy").delete() \
             .eq("grupa_id", grupa_id_target) \
@@ -158,19 +163,28 @@ def save_zajecia_grupy(events, grupa_id_target: str):
 
     return len(batch_data)
 
+
 def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
     if not events: return 0
-    # USUNIĘTO: supabase.table("zajecia_nauczyciela").delete().lt("koniec", "now()").execute()
 
     seen_uids = set()
     batch_data = []
+
     for e in events:
         if is_dataclass(e): e = asdict(e)
-        uid = e.get("external_uid") or e.get("uid")
+
+        # Pobieramy bazowy UID
+        base_uid = e.get("external_uid") or e.get("uid")
+
         poczatek = _normalize_timestamp(e.get("starts_at") or e.get("od"))
         koniec = _normalize_timestamp(e.get("ends_at") or e.get("do_"))
 
-        if not uid: continue
+        if not base_uid: continue
+
+        # KLUCZOWA ZMIANA: Prefiksujemy UID unikalnym ID nauczyciela!
+        # Dzięki temu współdzielone zajęcia będą miały osobne wpisy dla każdego prowadzącego.
+        uid = f"{nauczyciel_uuid}_{base_uid}"
+
         if uid in seen_uids: continue
 
         seen_uids.add(uid)
