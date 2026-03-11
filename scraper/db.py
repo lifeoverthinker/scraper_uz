@@ -104,37 +104,22 @@ def save_nauczyciele(teachers):
 
 
 def save_zajecia_grupy(events, grupa_id_target: str):
-    """
-    Zapisuje zajęcia grupy, aktualizuje zmienione dane (np. sala)
-    oraz usuwa zajęcia, które zostały odwołane (zniknęły z XML).
-    """
-    if not events:
-        return 0
+    if not events: return 0
 
     batch_data = []
     seen_uids = set()
 
     for e in events:
-        if is_dataclass(e):
-            e = asdict(e)
+        if is_dataclass(e): e = asdict(e)
 
-        # Pobieramy bazowy UID z parsera XML
         base_uid = e.get("external_uid") or e.get("uid")
-        if not base_uid:
-            continue
+        if not base_uid: continue
 
-        # ==========================================================
-        # KLUCZOWA ZMIANA: Prefiksujemy UID identyfikatorem grupy!
-        # Zapobiega to nadpisywaniu wykładów przez inne grupy.
-        # ==========================================================
         uid = f"{grupa_id_target}_{base_uid}"
 
-        if uid in seen_uids:
-            continue
-
+        if uid in seen_uids: continue
         seen_uids.add(uid)
 
-        # Przygotowanie rekordu zgodnie z Twoim schematem SQL
         batch_data.append({
             "uid": uid,
             "id_semestru": e.get("id_semestru"),
@@ -148,18 +133,23 @@ def save_zajecia_grupy(events, grupa_id_target: str):
             "grupa_id": grupa_id_target
         })
 
-    # 2. Upsert danych (Aktualizacja jeśli UID już istnieje)
     if batch_data:
         for b in chunks(batch_data, 500):
             supabase.table("zajecia_grupy").upsert(b, on_conflict="uid").execute()
 
-    # 3. USUWANIE ODWOŁANYCH ZAJĘĆ
+    # ZMIANA: Bezpieczne usuwanie starych zajęć w paczkach (zabezpiecza przed błędem 400 Bad Request)
     if seen_uids:
-        supabase.table("zajecia_grupy").delete() \
+        res = supabase.table("zajecia_grupy").select("uid") \
             .eq("grupa_id", grupa_id_target) \
             .gt("poczatek", "now()") \
-            .not_.in_("uid", list(seen_uids)) \
             .execute()
+
+        future_uids_in_db = [row["uid"] for row in (res.data or [])]
+        uids_to_delete = [uid for uid in future_uids_in_db if uid not in seen_uids]
+
+        if uids_to_delete:
+            for chunk in chunks(uids_to_delete, 100):
+                supabase.table("zajecia_grupy").delete().in_("uid", chunk).execute()
 
     return len(batch_data)
 
@@ -173,21 +163,17 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
     for e in events:
         if is_dataclass(e): e = asdict(e)
 
-        # Pobieramy bazowy UID
         base_uid = e.get("external_uid") or e.get("uid")
-
         poczatek = _normalize_timestamp(e.get("starts_at") or e.get("od"))
         koniec = _normalize_timestamp(e.get("ends_at") or e.get("do_"))
 
         if not base_uid: continue
 
-        # KLUCZOWA ZMIANA: Prefiksujemy UID unikalnym ID nauczyciela!
-        # Dzięki temu współdzielone zajęcia będą miały osobne wpisy dla każdego prowadzącego.
         uid = f"{nauczyciel_uuid}_{base_uid}"
 
         if uid in seen_uids: continue
-
         seen_uids.add(uid)
+
         batch_data.append({
             "uid": uid,
             "id_semestru": e.get("id_semestru"),
@@ -203,12 +189,18 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
     for b in chunks(batch_data, 500):
         supabase.table("zajecia_nauczyciela").upsert(b, on_conflict="uid").execute()
 
-    # Usuwanie znikniętych zajęć przyszłych dla tego nauczyciela
+    # ZMIANA: Bezpieczne usuwanie starych zajęć w paczkach (zabezpiecza przed błędem 400 Bad Request)
     if seen_uids:
-        supabase.table("zajecia_nauczyciela").delete() \
+        res = supabase.table("zajecia_nauczyciela").select("uid") \
             .eq("nauczyciel_id", nauczyciel_uuid) \
             .gt("poczatek", "now()") \
-            .not_.in_("uid", list(seen_uids)) \
             .execute()
+
+        future_uids_in_db = [row["uid"] for row in (res.data or [])]
+        uids_to_delete = [uid for uid in future_uids_in_db if uid not in seen_uids]
+
+        if uids_to_delete:
+            for chunk in chunks(uids_to_delete, 100):
+                supabase.table("zajecia_nauczyciela").delete().in_("uid", chunk).execute()
 
     return len(batch_data)
