@@ -62,6 +62,7 @@ def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
         return f"{tytuly_part} {imie_nazwisko}"
     return imie_nazwisko
 
+
 def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
     soup = BeautifulSoup(xml_content, "xml")
     results = []
@@ -153,9 +154,11 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
         g_od_val = get_txt("G_OD")
         g_do_val = get_txt("G_DO")
         dates_raw = get_txt("TERMIN_DT")
-        dzien_val = get_txt("DZIEN")
 
-        # UZ XML: DZIEN to 1=Poniedziałek, 2=Wtorek itd. Odejmujemy 1, by uzyskać przesunięcie (0 dla Poniedziałku)
+        # ZMIANA: Szukamy tagu DZIEN (grupy) LUB DAY (nauczyciele)
+        dzien_val = get_txt("DZIEN") or get_txt("DAY")
+
+        # UZ XML: DZIEN/DAY to 1=Poniedziałek, 2=Wtorek itd. Odejmujemy 1, by uzyskać przesunięcie (0 dla Poniedziałku)
         day_offset = int(dzien_val) - 1 if dzien_val and dzien_val.isdigit() else 0
 
         if dates_raw:
@@ -204,9 +207,11 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
 
     return out
 
+
 def _compose_datetime_iso(d: Optional[date], hhmm: Optional[str]) -> Optional[str]:
     if not d or not hhmm or ":" not in hhmm: return None
     try:
         h, m = map(int, hhmm.split(":"))
         return datetime(d.year, d.month, d.day, h, m).isoformat()
-    except: return None
+    except:
+        return None
