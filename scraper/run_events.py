@@ -26,11 +26,19 @@ def main():
                 root = ET.fromstring(xml_res.content)
 
                 # 1. Szybka aktualizacja metadanych grupy (tryb i semestr) z głównego planu
+                # 1. Bezpieczna aktualizacja metadanych grupy (tryb i semestr) z głównego planu
                 if file_prefix == "grupy_plan":
-                    supabase.table("grupy").update({
-                        "tryb": root.findtext("STUDIA_SYST"),
-                        "semestr": root.findtext("SEMESTER")
-                    }).eq("grupa_id", gid).execute()
+                    tryb_val = root.findtext(".//STUDIA_SYST")
+                    sem_val = root.findtext(".//SEMESTER")
+
+                    update_data = {}
+                    if tryb_val and tryb_val.strip():
+                        update_data["tryb"] = tryb_val.strip()
+                    if sem_val and sem_val.strip():
+                        update_data["semestr"] = sem_val.strip()
+
+                    if update_data:
+                        supabase.table("grupy").update(update_data).eq("grupa_id", gid).execute()
 
                 # 2. Parsowanie zdarzeń z XML i dodawanie do wspólnej listy
                 events = parse_group_plan_events(xml_res.content)

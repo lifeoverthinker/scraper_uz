@@ -73,20 +73,37 @@ def get_uuid_map(table, key_col, val_col):
 
 
 def save_grupy(grupy):
+    # Pobierz obecne dane z bazy, aby nie nadpisać ich pustymi wartościami z katalogu
+    try:
+        res = supabase.table("grupy").select("grupa_id, tryb, semestr").execute()
+        existing = {row["grupa_id"]: row for row in (res.data or [])}
+    except:
+        existing = {}
+
     unique_data = {}
     for g in grupy:
         gid = g.get("external_id") or g.get("grupa_id")
+
+        new_tryb = g.get("study_mode") or g.get("tryb_studiow")
+        new_semestr = g.get("semester_name") or g.get("semestr")
+
+        db_tryb = existing.get(gid, {}).get("tryb")
+        db_semestr = existing.get(gid, {}).get("semestr")
+
+        # Zachowaj stary tryb, jeśli nowy to "nieznane" / "nieznany" lub None
+        final_tryb = new_tryb if new_tryb and new_tryb not in ["nieznane", "nieznany"] else (db_tryb or "nieznane")
+        final_semestr = new_semestr if new_semestr else db_semestr
+
         unique_data[gid] = {
             "nazwa": g.get("kod_grupy") or g.get("nazwa"),
             "kierunek_id": g.get("kierunek_id"),
-            "tryb": g.get("study_mode") or g.get("tryb_studiow") or "nieznane",
-            "semestr": g.get("semester_name") or g.get("semestr"),
+            "tryb": final_tryb,
+            "semestr": final_semestr,
             "grupa_id": gid
         }
     data = list(unique_data.values())
     if data:
         supabase.table("grupy").upsert(data, on_conflict="grupa_id").execute()
-
 
 def save_nauczyciele(teachers):
     unique_data = {}

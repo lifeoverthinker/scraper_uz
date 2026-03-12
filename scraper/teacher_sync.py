@@ -6,16 +6,19 @@ from scraper.xml_client import XmlClient
 
 def sync_teacher_events_and_meta(verbose=True):
     client = XmlClient()
-    # Pobieramy nauczycieli - ważne: pobieramy też nazwę, by logować błędy
+    # Pobieramy nauczycieli - ważne: pobieramy też nazwę, by logować sukcesy i błędy
     res = supabase.table("nauczyciele").select("id, external_id, nazwisko_imie").execute()
     teachers = res.data or []
 
     total_saved = 0
 
+    if verbose:
+        print(f"🔄 Rozpoczynam synchronizację planów dla {len(teachers)} nauczycieli...")
+
     for t in teachers:
         teacher_uuid = t['id']
         ext_id = t['external_id']
-        full_name = t['nazwisko_imie']  #
+        full_name = t['nazwisko_imie']
 
         if not ext_id:
             continue
@@ -58,7 +61,7 @@ def sync_teacher_events_and_meta(verbose=True):
 
             except Exception as err:
                 if verbose:
-                    print(f"  [Błąd {full_name}]: {err}")
+                    print(f"  [BŁĄD {full_name}]: {err}")
 
         # Zapisujemy tylko dla TEGO KONKRETNEGO UUID
         if all_events_for_teacher or jednostki:
@@ -72,5 +75,8 @@ def sync_teacher_events_and_meta(verbose=True):
                 saved = save_zajecia_nauczyciela(all_events_for_teacher, teacher_uuid)
                 total_saved += saved
 
-    return {"status": "ok", "events_saved": total_saved}
+                # NOWY KOMUNIKAT O SUKCESIE
+                if verbose and saved > 0:
+                    print(f"  [SUKCES] Zapisano {saved} zajęć dla: {full_name}")
 
+    return {"status": "ok", "events_saved": total_saved}
