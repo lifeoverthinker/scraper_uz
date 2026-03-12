@@ -159,14 +159,12 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
         dzien_val = get_txt("DZIEN") or get_txt("DAY")
 
         # UZ XML: DZIEN/DAY to 1=Poniedziałek, 2=Wtorek itd. Odejmujemy 1, by uzyskać przesunięcie (0 dla Poniedziałku)
-        day_offset = int(dzien_val) - 1 if dzien_val and dzien_val.isdigit() else 0
-
         if dates_raw:
             for d_str in [c.strip() for c in dates_raw.split(";") if c.strip()]:
                 try:
-                    # Dodajemy day_offset do daty (która domyślnie jest poniedziałkiem danego tygodnia)
-                    base_date = datetime.strptime(d_str, "%Y-%m-%d").date()
-                    current_date = base_date + timedelta(days=day_offset)
+                    # UZ w TERMIN_DT podaje konkretne daty zajęć (np. co dwa tygodnie konkretne środy)
+                    # Nie trzeba do nich nic dodawać!
+                    current_date = datetime.strptime(d_str, "%Y-%m-%d").date()
 
                     starts_at = _compose_datetime_iso(current_date, g_od_val)
                     ends_at = _compose_datetime_iso(current_date, g_do_val)
