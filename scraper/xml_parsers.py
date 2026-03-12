@@ -182,7 +182,7 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
                         class_type=class_type,
                         teacher_name=teacher,
                         groups_label=get_txt("SORT"),
-                        subgroup=subgroup,
+                        subgroup=subgroup or "ALL",
                         id_semestru=semester_id,
                         raw_dates=[current_date]
                     ))
@@ -200,7 +200,7 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
                 class_type=class_type,
                 teacher_name=teacher,
                 groups_label=get_txt("SORT"),
-                subgroup=subgroup,
+                subgroup=subgroup or "ALL",
                 id_semestru=semester_id,
                 raw_dates=[]
             ))
