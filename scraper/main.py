@@ -8,19 +8,19 @@ from scraper.db import (
     supabase,
 )
 from scraper.xml_client import XmlClient
-from scraper.semester_manager import (
-    parse_semester_state_from_meta,
-    detect_semester_switch,
-    SemesterState,
-)
 from scraper.xml_sync import sync_directions_and_groups_from_xml
+
+# Aliasy trybow uruchomienia przez SCRAPER_ONLY.
+MODE_FULL = {"full", "all", "pipeline"}
+MODE_CATALOG = {"catalog_only", "catalog", "semester_guard", "guard"}
+MODE_XML_BOOTSTRAP = {"xml_bootstrap", "xml_semester"}
+MODE_XML_SYNC = {"xml_sync", "xml_groups", "kierunki", "grupy"}
+MODE_GROUP_EVENTS = {"grupy_zajecia", "groups_events", "events_groups"}
+MODE_TEACHER_EVENTS = {"teachers", "teacher_events", "nauczyciele"}
 
 
 def reset_database():
-    """
-    Czyści tabele bazy danych przed synchronizacją (opcjonalne).
-    Używane do weryfikacji poprawności importu na 'czystym' środowisku.
-    """
+    """Czyści tabele bazy danych przed synchronizacją (opcjonalnie)."""
     print("⚠️ CZYSZCZENIE BAZY DANYCH (Clean Start)...")
     tables = [
         "zajecia_grupy",
@@ -32,34 +32,10 @@ def reset_database():
     ]
     for table in tables:
         try:
-            # Usuwamy rekordy, które nie mają ID równego zeru (efektywnie wszystkie)
             supabase.table(table).delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
             print(f"  - Tabela '{table}' wyczyszczona.")
         except Exception as e:
             print(f"  - Błąd podczas czyszczenia '{table}': {e}")
-
-
-def _cleanup_semester_state_duplicates() -> None:
-    try:
-        rows = (
-                supabase.table("semester_state")
-                .select("id_semestru_aktualny,data_aktualizacji")
-                .order("data_aktualizacji", desc=True)
-                .execute()
-                .data
-                or []
-        )
-        if len(rows) <= 1:
-            return
-
-        newest_id = rows[0].get("id_semestru_aktualny")
-        if not newest_id:
-            return
-
-        # Usuwanie nadmiarowych wpisów stanu semestru
-        supabase.table("semester_state").delete().neq("id", 1).execute()
-    except Exception as e:
-        print(f"cleanup semester_state duplicates failed: {e}")
 
 
 def _run_xml_bootstrap() -> tuple[bool, str]:
@@ -119,23 +95,24 @@ def _run_full() -> None:
 
 
 def main() -> None:
+    """Główny punkt wejścia: uruchamia wybrany etap synchronizacji."""
     start_time = time.time()
 
-    # reset_database()  # Odkoduj tę linię, jeśli chcesz wyczyścić bazę przed startem
+    # reset_database()  # Odkoduj tę linię, jeśli chcesz wyczyścić bazę przed startem.
 
     mode = os.getenv("SCRAPER_ONLY", "").lower().strip()
 
-    if mode in {"full", "all", "pipeline"}:
+    if mode in MODE_FULL:
         _run_full()
-    elif mode in {"catalog_only", "catalog", "semester_guard", "guard"}:
+    elif mode in MODE_CATALOG:
         _run_catalog_only()
-    elif mode in {"xml_bootstrap", "xml_semester"}:
+    elif mode in MODE_XML_BOOTSTRAP:
         _run_xml_bootstrap()
-    elif mode in {"xml_sync", "xml_groups", "kierunki", "grupy"}:
+    elif mode in MODE_XML_SYNC:
         _run_xml_sync()
-    elif mode in {"grupy_zajecia", "groups_events", "events_groups"}:
+    elif mode in MODE_GROUP_EVENTS:
         _run_group_events()
-    elif mode in {"teachers", "teacher_events", "nauczyciele"}:
+    elif mode in MODE_TEACHER_EVENTS:
         _run_teacher_events()
     else:
         if mode:
@@ -144,7 +121,6 @@ def main() -> None:
             print("Brak zdefiniowanego trybu -> uruchamiam domyślną synchronizację katalogów")
         _run_catalog_only()
 
-    # Statystyki końcowe
     duration = time.time() - start_time
     minutes = int(duration // 60)
     seconds = int(duration % 60)

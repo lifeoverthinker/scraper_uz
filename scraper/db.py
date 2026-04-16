@@ -1,5 +1,7 @@
 from __future__ import annotations
-import hashlib, os, time
+import os
+import random
+import time
 from pathlib import Path
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional
@@ -12,33 +14,43 @@ project_root = Path(__file__).resolve().parent.parent
 load_dotenv(project_root / ".env")
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
 
+UPSERT_CHUNK_SIZE = 200
+DELETE_CHUNK_SIZE = 50
+RETRY_MAX_ATTEMPTS = 5
+RETRY_BASE_DELAY_SECONDS = 1.0
+RETRY_MAX_DELAY_SECONDS = 12.0
 
-def _norm(v: Any) -> str: return str(v).strip().casefold()
 
-
-def _str(v: Any) -> str: return "" if v is None else str(v)
+def _str(v: Any) -> str:
+    return "" if v is None else str(v)
 
 
 def _normalize_timestamp(v: Any) -> str | None:
-    if v is None: return None
-    if isinstance(v, datetime): return v.isoformat()
-    t = str(v).strip()
-    if not t or t.upper() in {"NO_DATE", "NULL"}: return None
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.isoformat()
+
+    text_value = str(v).strip()
+    if not text_value or text_value.upper() in {"NO_DATE", "NULL"}:
+        return None
+
     try:
-        return datetime.fromisoformat(t.replace("Z", "+00:00")).isoformat()
-    except:
+        return datetime.fromisoformat(text_value.replace("Z", "+00:00")).isoformat()
+    except (TypeError, ValueError):
         return None
 
 
 def chunks(lst, n):
-    for i in range(0, len(lst), n): yield lst[i:i + n]
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
 
 def get_semester_state() -> Optional[dict]:
     try:
         res = supabase.table("semester_state").select("*").eq("id", 1).execute()
         return res.data[0] if res.data else None
-    except:
+    except Exception:
         return None
 
 
@@ -73,16 +85,18 @@ def get_uuid_map(table, key_col, val_col):
 
 
 def save_grupy(grupy):
-    # Pobierz obecne dane z bazy, aby nie nadpisać ich pustymi wartościami z katalogu
+    # Pobierz obecne dane z bazy, aby nie nadpisac ich pustymi wartosciami z katalogu
     try:
         res = supabase.table("grupy").select("grupa_id, tryb, semestr").execute()
         existing = {row["grupa_id"]: row for row in (res.data or [])}
-    except:
+    except Exception:
         existing = {}
 
     unique_data = {}
     for g in grupy:
         gid = g.get("external_id") or g.get("grupa_id")
+        if not gid:
+            continue
 
         new_tryb = g.get("study_mode") or g.get("tryb_studiow")
         new_semestr = g.get("semester_name") or g.get("semestr")
@@ -90,7 +104,7 @@ def save_grupy(grupy):
         db_tryb = existing.get(gid, {}).get("tryb")
         db_semestr = existing.get(gid, {}).get("semestr")
 
-        # Zachowaj stary tryb, jeśli nowy to "nieznane" / "nieznany" lub None
+        # Zachowaj stary tryb, jesli nowy jest nieznany lub pusty.
         final_tryb = new_tryb if new_tryb and new_tryb not in ["nieznane", "nieznany"] else (db_tryb or "nieznane")
         final_semestr = new_semestr if new_semestr else db_semestr
 
@@ -101,27 +115,78 @@ def save_grupy(grupy):
             "semestr": final_semestr,
             "grupa_id": gid
         }
+
     data = list(unique_data.values())
     if data:
         supabase.table("grupy").upsert(data, on_conflict="grupa_id").execute()
 
+
+def _is_transient_supabase_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    transient_markers = [
+        " 502", " 503", " 504", "bad gateway", "service unavailable", "gateway timeout",
+        "text/html", "<!doctype html", "<html", "json could not be generated"
+    ]
+    return any(marker in msg for marker in transient_markers)
+
+
+def _upsert_with_retry(table_name: str, rows: List[Dict[str, Any]], on_conflict: str,
+                       max_retries: int = RETRY_MAX_ATTEMPTS,
+                       base_delay: float = RETRY_BASE_DELAY_SECONDS,
+                       max_delay: float = RETRY_MAX_DELAY_SECONDS):
+    last_exc: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            supabase.table(table_name).upsert(rows, on_conflict=on_conflict).execute()
+            return
+        except Exception as exc:
+            last_exc = exc
+            is_transient = _is_transient_supabase_error(exc)
+            if not is_transient or attempt == max_retries:
+                print(f"Blad upsert {table_name} (proba {attempt}/{max_retries}): {exc}")
+                raise
+
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.4)
+            print(f"Transient blad upsert {table_name} (proba {attempt}/{max_retries}), retry za {delay:.2f}s")
+            time.sleep(delay)
+
+    if last_exc:
+        raise last_exc
+
+
 def save_nauczyciele(teachers):
+    """Czyści i zapisuje nauczycieli do tabeli nauczyciele, deduplikując po external_id."""
     unique_data = {}
+
     for t in teachers:
-        ext_id = t.get("external_id")
+        if is_dataclass(t):
+            t = asdict(t)
+
+        ext_id = _str(t.get("external_id")).strip()
+        if not ext_id:
+            continue
+
+        name = _str(t.get("name") or t.get("nazwa") or t.get("nazwisko_imie")).strip() or None
+        unit = _str(t.get("unit_name") or t.get("instytut") or t.get("jednostka")).strip() or None
+        email = _str(t.get("email")).strip() or None
+
         unique_data[ext_id] = {
-            "nazwisko_imie": t.get("name") or t.get("nazwa") or t.get("nazwisko_imie"),
-            "jednostka": t.get("unit_name") or t.get("instytut") or t.get("jednostka"),
-            "email": t.get("email"),
+            "nazwisko_imie": name,
+            "jednostka": unit,
+            "email": email,
             "external_id": ext_id
         }
+
     data = list(unique_data.values())
     if data:
-        supabase.table("nauczyciele").upsert(data, on_conflict="external_id").execute()
+        for chunk in chunks(data, UPSERT_CHUNK_SIZE):
+            _upsert_with_retry("nauczyciele", chunk, on_conflict="external_id")
 
 
 def save_zajecia_grupy(events, grupa_id_target: str):
-    if not events: return 0
+    if not events:
+        return 0
 
     batch_data = []
     seen_uids = set()
@@ -151,11 +216,11 @@ def save_zajecia_grupy(events, grupa_id_target: str):
         })
 
     if batch_data:
-        for b in chunks(batch_data, 200): # Zmniejszono z 500 na 200 dla stabilności
+        for b in chunks(batch_data, UPSERT_CHUNK_SIZE):
             try:
                 supabase.table("zajecia_grupy").upsert(b, on_conflict="uid").execute()
             except Exception as e:
-                print(f"Błąd upsert grupy {grupa_id_target}: {e}")
+                print(f"Blad upsert grupy {grupa_id_target}: {e}")
 
     if seen_uids:
         try:
@@ -168,16 +233,17 @@ def save_zajecia_grupy(events, grupa_id_target: str):
             uids_to_delete = [uid for uid in future_uids_in_db if uid not in seen_uids]
 
             if uids_to_delete:
-                for chunk in chunks(uids_to_delete, 50): # Zmniejszono na 50
+                for chunk in chunks(uids_to_delete, DELETE_CHUNK_SIZE):
                     supabase.table("zajecia_grupy").delete().in_("uid", chunk).execute()
         except Exception as e:
-            print(f"Błąd czyszczenia zajęć grupy {grupa_id_target}: {e}")
+            print(f"Blad czyszczenia zajec grupy {grupa_id_target}: {e}")
 
     return len(batch_data)
 
 
 def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
-    if not events: return 0
+    if not events:
+        return 0
 
     seen_uids = set()
     batch_data = []
@@ -209,11 +275,11 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
         })
 
     if batch_data:
-        for b in chunks(batch_data, 200): # Zmniejszono z 500 na 200
+        for b in chunks(batch_data, UPSERT_CHUNK_SIZE):
             try:
                 supabase.table("zajecia_nauczyciela").upsert(b, on_conflict="uid").execute()
             except Exception as e:
-                print(f"Błąd upsert nauczyciela {nauczyciel_uuid}: {e}")
+                print(f"Blad upsert nauczyciela {nauczyciel_uuid}: {e}")
 
     if seen_uids:
         try:
@@ -226,9 +292,10 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
             uids_to_delete = [uid for uid in future_uids_in_db if uid not in seen_uids]
 
             if uids_to_delete:
-                for chunk in chunks(uids_to_delete, 50): # Zmniejszono na 50
+                for chunk in chunks(uids_to_delete, DELETE_CHUNK_SIZE):
                     supabase.table("zajecia_nauczyciela").delete().in_("uid", chunk).execute()
         except Exception as e:
-            print(f"Błąd czyszczenia zajęć nauczyciela {nauczyciel_uuid}: {e}")
+            print(f"Blad czyszczenia zajęć nauczyciela {nauczyciel_uuid}: {e}")
 
     return len(batch_data)
+

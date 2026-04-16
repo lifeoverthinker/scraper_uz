@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
-from typing import Any, Optional
+from datetime import datetime, date
+from typing import Optional
 import re
 from bs4 import BeautifulSoup
 
@@ -38,15 +38,11 @@ class XmlScheduleEvent:
 
 
 def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
-    """
-    Poprawiona wersja: Czyści nazwisko z nadmiarowych spacji i tytułów,
-    zachowując format 'tytuły Imię Nazwisko'.
-    """
+    """Czyści nazwisko z nadmiarowych spacji i zachowuje format: tytuly + imie nazwisko."""
     if not raw_name or raw_name.lower() == "brak":
         return None
 
-    # Czyścimy z tagów HTML jeśli by wystąpiły i nadmiaru białych znaków
-    raw_name = re.sub(r'\s+', ' ', raw_name).strip()
+    raw_name = re.sub(r"\s+", " ", raw_name).strip()
 
     parts = raw_name.split(',', 1)
     imie_nazwisko_part = parts[0].strip()
@@ -54,7 +50,6 @@ def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
 
     name_tokens = imie_nazwisko_part.split()
     if len(name_tokens) > 1:
-        # Obsługa nazwisk dwuczłonowych: ostatni token to nazwisko, reszta to imiona
         imie_nazwisko = " ".join(name_tokens[1:]) + " " + name_tokens[0]
     else:
         imie_nazwisko = imie_nazwisko_part
@@ -62,6 +57,7 @@ def _format_teacher_name(raw_name: Optional[str]) -> Optional[str]:
     if tytuly_part:
         return f"{tytuly_part} {imie_nazwisko}"
     return imie_nazwisko
+
 
 def parse_directions_from_xml(xml_content: str) -> list[XmlDirection]:
     soup = BeautifulSoup(xml_content, "xml")
@@ -124,7 +120,8 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
     for it in items:
         uid_tag = it.find("ID_POZYCJA") or it.find("UID")
         subject_tag = it.find("NAME") or it.find("PRZEDMIOT")
-        if not uid_tag or not subject_tag: continue
+        if not uid_tag or not subject_tag:
+            continue
 
         def get_txt(tag_name):
             f = it.find(tag_name)
@@ -137,7 +134,6 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
         semester_id = get_txt("ID_SEMESTR") or header_semester_id
         class_type = get_txt("RZ")
 
-        # --- Logika Sali ---
         room = None
         sale_node = it.find("SALE")
         if sale_node:
@@ -150,25 +146,16 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
             if remarks and "s." in remarks:
                 room = remarks.split("s.")[-1].strip().replace("\n", " ")
 
-        # --- Czas i Daty ---
         g_od_val = get_txt("G_OD")
         g_do_val = get_txt("G_DO")
         dates_raw = get_txt("TERMIN_DT")
 
-        # ZMIANA: Szukamy tagu DZIEN (grupy) LUB DAY (nauczyciele)
-        dzien_val = get_txt("DZIEN") or get_txt("DAY")
-
-        # UZ XML: DZIEN/DAY to 1=Poniedziałek, 2=Wtorek itd. Odejmujemy 1, by uzyskać przesunięcie (0 dla Poniedziałku)
         if dates_raw:
             for d_str in [c.strip() for c in dates_raw.split(";") if c.strip()]:
                 try:
-                    # UZ w TERMIN_DT podaje konkretne daty zajęć (np. co dwa tygodnie konkretne środy)
-                    # Nie trzeba do nich nic dodawać!
                     current_date = datetime.strptime(d_str, "%Y-%m-%d").date()
-
                     starts_at = _compose_datetime_iso(current_date, g_od_val)
                     ends_at = _compose_datetime_iso(current_date, g_do_val)
-
                     safe_subgroup = (subgroup or "ALL").replace(" ", "_")
 
                     out.append(XmlScheduleEvent(
@@ -185,7 +172,7 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
                         raw_dates=[current_date]
                     ))
                 except Exception as e:
-                    print(f"Ignoruję wadliwą datę w zajęciach {uid_tag.get_text(strip=True)}: {e}")
+                    print(f"Ignoruje wadliwa date w zajeciach {uid_tag.get_text(strip=True)}: {e}")
                     continue
 
         else:
@@ -207,9 +194,11 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
 
 
 def _compose_datetime_iso(d: Optional[date], hhmm: Optional[str]) -> Optional[str]:
-    if not d or not hhmm or ":" not in hhmm: return None
+    if not d or not hhmm or ":" not in hhmm:
+        return None
     try:
         h, m = map(int, hhmm.split(":"))
         return datetime(d.year, d.month, d.day, h, m).isoformat()
-    except:
+    except (TypeError, ValueError):
         return None
+

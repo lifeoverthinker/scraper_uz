@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Optional
 from urllib.parse import urljoin
@@ -12,6 +12,22 @@ import requests
 from bs4 import BeautifulSoup
 
 DEFAULT_BASE_URL = "https://plan.uz.zgora.pl/static_files/"
+DEFAULT_USER_AGENT = "scraper_uz_xml_client/1.2"
+DEFAULT_ACCEPT_HEADER = "application/xml,text/xml;q=0.9,*/*;q=0.8"
+DEFAULT_TIMEOUT_SECONDS = 20
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF_START_SECONDS = 1.0
+
+ROOT_TAG = "ROOT"
+DATE_HEADER = "Date"
+XML_TAG_SEMESTER_ID = ["SEMESTER_ID", "CURRENT_SEMESTER_ID", "SEMESTR_BIEZACY_ID"]
+XML_TAG_SEMESTER_NAME_PL = ["SEMESTER", "CURRENT_SEMESTER_NAME", "SEMESTR_BIEZACY_NAZWA"]
+XML_TAG_SEMESTER_NAME_EN = ["SEMESTER_EN", "CURRENT_SEMESTER_NAME_EN", "SEMESTR_BIEZACY_NAZWA_EN"]
+XML_TAG_PREVIOUS_ID = ["SEMESTER_PREV_ID", "PREVIOUS_SEMESTER_ID", "SEMESTR_POPRZEDNI_ID"]
+XML_TAG_PREVIOUS_NAME_PL = ["SEMESTER_PREV", "PREVIOUS_SEMESTER_NAME", "SEMESTR_POPRZEDNI_NAZWA"]
+XML_TAG_PREVIOUS_NAME_EN = ["SEMESTER_PREV_EN", "PREVIOUS_SEMESTER_NAME_EN", "SEMESTR_POPRZEDNI_NAZWA_EN"]
+XML_TAG_GENERATED = ["GENERATED", "GENERATED_AT", "DATA_GENEROWANIA", "TIMESTAMP"]
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,10 +56,10 @@ class XmlClient:
     def __init__(
         self,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: int = 20,
-        max_retries: int = 3,
-        backoff_start_seconds: float = 1.0,
-        user_agent: str = "my_uz_xml_client/1.2",
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_start_seconds: float = DEFAULT_BACKOFF_START_SECONDS,
+        user_agent: str = DEFAULT_USER_AGENT,
     ) -> None:
         self.base_url = base_url if base_url.endswith("/") else f"{base_url}/"
         self.timeout = timeout
@@ -53,7 +69,7 @@ class XmlClient:
         self.session.headers.update(
             {
                 "User-Agent": user_agent,
-                "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8",
+                "Accept": DEFAULT_ACCEPT_HEADER,
             }
         )
 
@@ -72,19 +88,17 @@ class XmlClient:
     @staticmethod
     def parse_semester_meta(xml_content: str, source_url: str = "") -> SemesterMeta:
         soup = BeautifulSoup(xml_content, "xml")
-        root = soup.find("ROOT") or soup.find()
+        root = soup.find(ROOT_TAG) or soup.find()
         if root is None:
             raise ValueError("Niepoprawny XML: brak ROOT")
 
-        current_id = _pick_first_value(root, ["SEMESTER_ID", "CURRENT_SEMESTER_ID", "SEMESTR_BIEZACY_ID"])
-        current_pl = _pick_first_value(root, ["SEMESTER", "CURRENT_SEMESTER_NAME", "SEMESTR_BIEZACY_NAZWA"])
-        current_en = _pick_first_value(root, ["SEMESTER_EN", "CURRENT_SEMESTER_NAME_EN", "SEMESTR_BIEZACY_NAZWA_EN"])
-
-        prev_id = _pick_first_value(root, ["SEMESTER_PREV_ID", "PREVIOUS_SEMESTER_ID", "SEMESTR_POPRZEDNI_ID"])
-        prev_pl = _pick_first_value(root, ["SEMESTER_PREV", "PREVIOUS_SEMESTER_NAME", "SEMESTR_POPRZEDNI_NAZWA"])
-        prev_en = _pick_first_value(root, ["SEMESTER_PREV_EN", "PREVIOUS_SEMESTER_NAME_EN", "SEMESTR_POPRZEDNI_NAZWA_EN"])
-
-        generated_at = _pick_first_value(root, ["GENERATED", "GENERATED_AT", "DATA_GENEROWANIA", "TIMESTAMP"])
+        current_id = _pick_first_value(root, XML_TAG_SEMESTER_ID)
+        current_pl = _pick_first_value(root, XML_TAG_SEMESTER_NAME_PL)
+        current_en = _pick_first_value(root, XML_TAG_SEMESTER_NAME_EN)
+        prev_id = _pick_first_value(root, XML_TAG_PREVIOUS_ID)
+        prev_pl = _pick_first_value(root, XML_TAG_PREVIOUS_NAME_PL)
+        prev_en = _pick_first_value(root, XML_TAG_PREVIOUS_NAME_EN)
+        generated_at = _pick_first_value(root, XML_TAG_GENERATED)
 
         return SemesterMeta(
             current_semester_id=_clean(current_id),
@@ -111,10 +125,9 @@ class XmlClient:
 
                 if status == 404:
                     logger.warning("XML not found (404): %s", url)
-                    return XmlFetchResult(url=url, status_code=status, content=None, fetched_at_utc=datetime.utcnow())
+                    return XmlFetchResult(url=url, status_code=status, content=None, fetched_at_utc=datetime.now(timezone.utc))
 
                 if 200 <= status < 300:
-                    # KLUCZOWE: wymuszenie UTF-8 (bo serwer czasem podaje złe kodowanie)
                     try:
                         text = resp.content.decode("utf-8", errors="replace")
                     except Exception:
@@ -133,7 +146,7 @@ class XmlClient:
                     backoff *= 2
                     continue
 
-                return XmlFetchResult(url=url, status_code=status, content=None, fetched_at_utc=datetime.utcnow())
+                return XmlFetchResult(url=url, status_code=status, content=None, fetched_at_utc=datetime.now(timezone.utc))
 
             except requests.RequestException as exc:
                 last_exc = exc
@@ -169,10 +182,11 @@ def _clean(value: Optional[str]) -> Optional[str]:
 
 
 def _response_time_or_now(resp: requests.Response) -> datetime:
-    date_hdr = resp.headers.get("Date")
+    date_hdr = resp.headers.get(DATE_HEADER)
     if not date_hdr:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc)
     try:
-        return parsedate_to_datetime(date_hdr).replace(tzinfo=None)
+        return parsedate_to_datetime(date_hdr).astimezone(timezone.utc)
     except Exception:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc)
+
