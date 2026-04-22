@@ -1,7 +1,7 @@
-import xml.etree.ElementTree as ET
 from scraper.db import supabase, save_zajecia_nauczyciela
 from scraper.xml_parsers import parse_teacher_plan_events
 from scraper.xml_client import XmlClient
+from bs4 import BeautifulSoup  # Zamieniliśmy ET na BeautifulSoup
 
 TEACHER_PLAN_SOURCES = ["nauczyciel_plan", "nauczyciel_hplan"]
 
@@ -35,6 +35,7 @@ def sync_teacher_events_and_meta(verbose=True):
                 continue
 
             try:
+                # 1. Parsowanie zajęć
                 events = parse_teacher_plan_events(xml_res.content)
                 for event in events:
                     all_events_for_teacher.append({
@@ -48,21 +49,27 @@ def sync_teacher_events_and_meta(verbose=True):
                         "groups_label": event.groups_label,
                     })
 
-                root = ET.fromstring(xml_res.content)
-                email_tag = root.findtext("E_MAIL")
-                if email_tag:
-                    teacher_email = email_tag
+                # 2. Parsowanie E-maila i Jednostki (Używamy BeautifulSoup!)
+                soup = BeautifulSoup(xml_res.content, "xml")
 
-                for child in root:
-                    if child.tag.startswith("JEDN") and child.text:
-                        jednostki.add(child.text.strip())
+                email_tag = soup.find("E_MAIL")
+                if email_tag and email_tag.text:
+                    teacher_email = email_tag.get_text(strip=True)
+
+                # Zbieranie nazw jednostek
+                for tag_name in ["JEDN", "JEDN_EN", "JEDN2", "JEDN2_EN"]:
+                    jedn_node = soup.find(tag_name)
+                    if jedn_node and jedn_node.text:
+                        jednostki.add(jedn_node.get_text(strip=True))
 
             except Exception as err:
                 if verbose:
                     print(f"[BLAD {full_name}]: {err}")
 
+        # Zapis do bazy Supabase
         if all_events_for_teacher or jednostki:
-            jednostka_str = " | ".join(jednostki)
+            jednostka_str = " | ".join(jednostki) if jednostki else None
+
             supabase.table("nauczyciele").update({
                 "email": teacher_email,
                 "jednostka": jednostka_str,
