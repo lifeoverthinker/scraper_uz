@@ -30,23 +30,23 @@ def sync_teacher_events_and_meta(verbose=True):
         teacher_email = None
 
         for source_prefix in TEACHER_PLAN_SOURCES:
-            xml_res = client.fetch_xml(f"{source_prefix}.ID={ext_id}.xml")
-            if not xml_res.content:
-                continue
-
             try:
+                xml_res = client.fetch_xml(f"{source_prefix}.ID={ext_id}.xml")
+                if not xml_res or not xml_res.content:
+                    continue
+
                 # 1. Parsowanie zajęć
                 events = parse_teacher_plan_events(xml_res.content)
                 for event in events:
                     all_events_for_teacher.append({
                         "uid": event.external_uid,
                         "id_semestru": event.id_semestru,
-                        "starts_at": event.starts_at,
-                        "ends_at": event.ends_at,
-                        "subject": event.subject,
-                        "class_type": event.class_type,
-                        "room": event.room,
-                        "groups_label": event.groups_label,
+                        "poczatek": event.starts_at,
+                        "koniec": event.ends_at,
+                        "przedmiot": event.subject,
+                        "rodzaj_zajec": event.class_type,
+                        "sala": event.room,
+                        "grupy": event.groups_label,
                     })
 
                 # 2. Parsowanie E-maila i Jednostki (Używamy BeautifulSoup!)

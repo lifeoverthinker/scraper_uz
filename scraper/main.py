@@ -22,17 +22,20 @@ MODE_TEACHER_EVENTS = {"teachers", "teacher_events", "nauczyciele"}
 def reset_database():
     """Czyści tabele bazy danych przed synchronizacją (opcjonalnie)."""
     print("⚠️ CZYSZCZENIE BAZY DANYCH (Clean Start)...")
-    tables = [
-        "zajecia_grupy",
-        "zajecia_nauczyciela",
-        "grupy",
-        "nauczyciele",
-        "kierunki",
-        "semester_state"
+    tables_pk = [
+        ("zajecia_grupy", "uid"),
+        ("zajecia_nauczyciela", "uid"),
+        ("grupy", "grupa_id"),
+        ("nauczyciele", "external_id"),
+        ("kierunki", "external_id"),
+        ("stan_semestru", "id")
     ]
-    for table in tables:
+    for table, pk in tables_pk:
         try:
-            supabase.table(table).delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+            if pk == "id":
+                supabase.table(table).delete().neq(pk, 0).execute()
+            else:
+                supabase.table(table).delete().neq(pk, "").execute()
             print(f"  - Tabela '{table}' wyczyszczona.")
         except Exception as e:
             print(f"  - Błąd podczas czyszczenia '{table}': {e}")
@@ -45,6 +48,10 @@ def _run_xml_bootstrap() -> tuple[bool, str]:
     # Pobieramy metadane z nagłówka XML
     meta = client.fetch_semester_meta_from_file("grupy_lista_kierunkow.xml")
 
+    # Detekcja zmiany semestru (porównanie z poprzednim stanem przed nadpisaniem)
+    prev_state = get_semester_state()
+    semester_changed = bool(prev_state and prev_state.get("id_semestru_aktualny") != meta.current_semester_id)
+
     # Zapisujemy bieżący stan semestrów do bazy
     save_semester_state({
         "current_semester_id": meta.current_semester_id,
@@ -53,9 +60,7 @@ def _run_xml_bootstrap() -> tuple[bool, str]:
         "previous_semester_name": meta.previous_semester_name_pl
     })
 
-    # Detekcja zmiany semestru (porównanie z poprzednim zapisem)
-    prev_state = get_semester_state()
-    if prev_state and prev_state.get("id_semestru_aktualny") != meta.current_semester_id:
+    if semester_changed:
         print(f"!!! WYKRYTO ZMIANĘ SEMESTRU: {meta.current_semester_id} !!!")
         return True, "semester_changed"
 

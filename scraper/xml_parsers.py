@@ -127,8 +127,10 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
             f = it.find(tag_name)
             return f.get_text(strip=True) if f and f.text else None
 
-        raw_teacher = get_txt("SORT")
-        teacher = _format_teacher_name(raw_teacher)
+        sort_val = get_txt("SORT")
+        # W planie grupy SORT to nazwisko prowadzacego, w planie nauczyciela SORT to kody grup
+        teacher = _format_teacher_name(sort_val) if (source_url and "grupy" in source_url or not source_url) else None
+        groups_label = sort_val
 
         subgroup = get_txt("PG")
         semester_id = get_txt("ID_SEMESTR") or header_semester_id
@@ -166,7 +168,7 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
                         room=room,
                         class_type=class_type,
                         teacher_name=teacher,
-                        groups_label=get_txt("SORT"),
+                        groups_label=groups_label,
                         subgroup=subgroup or "ALL",
                         id_semestru=semester_id,
                         raw_dates=[current_date]

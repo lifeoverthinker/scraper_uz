@@ -1,7 +1,7 @@
 name: Scraper Sync
 on:
   schedule:
-    - cron: '40 5,9,13,16,21 * * *' # 25 min po generowaniu plików (15+25=40)
+    - cron: '40 5,9,13,16,21 * * *'
   workflow_dispatch:
     inputs:
       run_mode:
@@ -11,20 +11,26 @@ on:
         type: choice
         options:
           - full
-          - sync
           - catalog_only
+
+concurrency:
+  group: scraper-sync
+  cancel-in-progress: false
 
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
-      # Ustawiamy globalną zmienną dla całego joba
-      SCRAPER_MODE: ${{ github.event.inputs.run_mode || 'full' }}
+      PYTHONUNBUFFERED: "1"
+      SCRAPER_ONLY: ${{ inputs.run_mode || 'full' }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Setup Python
-        uses: actions/setup-python@v4
-        with: {python-version: '3.11'}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
       - name: Install dependencies
         run: pip install -r scraper/requirements.txt
       - name: Run Scraper
@@ -32,6 +38,4 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SCRAPER_ONLY: ${{ env.SCRAPER_MODE }}   # <-- dodaj tę linię
-          MODE: ${{ env.SCRAPER_MODE }}
-          SCRAPER_MODE: ${{ env.SCRAPER_MODE }}
+          SCRAPER_ONLY: ${{ env.SCRAPER_ONLY }}

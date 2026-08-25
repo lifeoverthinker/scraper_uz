@@ -48,7 +48,7 @@ def chunks(lst, n):
 
 def get_semester_state() -> Optional[dict]:
     try:
-        res = supabase.table("semester_state").select("*").eq("id", 1).execute()
+        res = supabase.table("stan_semestru").select("*").eq("id", 1).execute()
         return res.data[0] if res.data else None
     except Exception:
         return None
@@ -63,7 +63,7 @@ def save_semester_state(data: dict):
         "nazwa_semestru_poprzedni": data.get("previous_semester_name_pl") or data.get("previous_semester_name"),
         "data_aktualizacji": "now()"
     }
-    supabase.table("semester_state").upsert(payload).execute()
+    supabase.table("stan_semestru").upsert(payload).execute()
 
 
 def save_kierunki(kierunki):
@@ -202,16 +202,20 @@ def save_zajecia_grupy(events, grupa_id_target: str):
         if uid in seen_uids: continue
         seen_uids.add(uid)
 
+        poczatek = _normalize_timestamp(e.get("starts_at") or e.get("poczatek") or e.get("od"))
+        koniec = _normalize_timestamp(e.get("ends_at") or e.get("koniec") or e.get("do_"))
+
         batch_data.append({
             "uid": uid,
             "id_semestru": e.get("id_semestru"),
-            "poczatek": e.get("starts_at"),
-            "koniec": e.get("ends_at"),
-            "przedmiot": e.get("subject"),
-            "rodzaj_zajec": e.get("class_type"),
-            "sala": e.get("room"),
-            "nauczyciel": e.get("teacher_name"),
-            "podgrupa": e.get("subgroup")[:20] if e.get("subgroup") else None,
+            "poczatek": poczatek,
+            "koniec": koniec,
+            "przedmiot": e.get("subject") or e.get("przedmiot"),
+            "rodzaj_zajec": e.get("class_type") or e.get("rodzaj_zajec") or e.get("rz"),
+            "sala": e.get("room") or e.get("sala") or e.get("miejsce"),
+            "nauczyciel": e.get("teacher_name") or e.get("nauczyciel"),
+            "podgrupa": (e.get("subgroup") or e.get("podgrupa"))[:20] if (
+                        e.get("subgroup") or e.get("podgrupa")) else None,
             "grupa_id": grupa_id_target
         })
 
@@ -252,8 +256,8 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
         if is_dataclass(e): e = asdict(e)
 
         base_uid = e.get("external_uid") or e.get("uid")
-        poczatek = _normalize_timestamp(e.get("starts_at") or e.get("od"))
-        koniec = _normalize_timestamp(e.get("ends_at") or e.get("do_"))
+        poczatek = _normalize_timestamp(e.get("starts_at") or e.get("poczatek") or e.get("od"))
+        koniec = _normalize_timestamp(e.get("ends_at") or e.get("koniec") or e.get("do_"))
 
         if not base_uid: continue
 
@@ -268,8 +272,8 @@ def save_zajecia_nauczyciela(events, nauczyciel_uuid: str):
             "poczatek": poczatek,
             "koniec": koniec,
             "przedmiot": e.get("subject") or e.get("przedmiot"),
-            "rodzaj_zajec": e.get("class_type") or e.get("rz"),
-            "sala": e.get("room") or e.get("miejsce"),
+            "rodzaj_zajec": e.get("class_type") or e.get("rodzaj_zajec") or e.get("rz"),
+            "sala": e.get("room") or e.get("sala") or e.get("miejsce"),
             "grupy": e.get("groups_label") or e.get("grupy"),
             "nauczyciel_id": nauczyciel_uuid
         })

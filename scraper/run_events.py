@@ -19,11 +19,11 @@ def main():
         all_events_for_group = []
 
         for source_prefix in GROUP_PLAN_SOURCES:
-            xml_res = client.fetch_xml(f"{source_prefix}.ID={gid}.xml")
-            if not xml_res.content:
-                continue
-
             try:
+                xml_res = client.fetch_xml(f"{source_prefix}.ID={gid}.xml")
+                if not xml_res or not xml_res.content:
+                    continue
+
                 root = ET.fromstring(xml_res.content)
 
                 # Aktualizacja metadanych grupy z glownego planu.

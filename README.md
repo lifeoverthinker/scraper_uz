@@ -18,7 +18,7 @@ Prosty scraper, który pobiera plan zajęć Uniwersytetu Zielonogórskiego z pli
 - `nauczyciele` - imię/nazwisko, e-mail, jednostka,
 - `grupy` - nazwa grupy, tryb, semestr,
 - `kierunki` - lista kierunków,
-- `semester_state` - bieżący stan semestru.
+- `stan_semestru` - bieżący stan semestru.
 
 ## Uruchomienie lokalne
 1. Dodaj plik `.env` z danymi:

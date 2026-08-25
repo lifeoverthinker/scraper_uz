@@ -48,36 +48,44 @@ def _sync_groups(client: XmlClient, directions):
         for group in parse_groups_from_xml(groups_xml.content, direction_external_id=direction.external_id):
             all_groups.append({
                 "grupa_id": group.external_id,
-                "kod_grupy": group.code,
+                "nazwa": group.code,
                 "kierunek_id": kierunek_uuid,
-                "link_strony_grupy": GROUP_PAGE_URL_TEMPLATE.format(group_id=group.external_id),
-                "tryb_studiow": group.study_mode or "nieznany",
+                "tryb": group.study_mode or "nieznany",
             })
 
     save_grupy(all_groups)
 
 
 def _sync_teachers():
-    wydzialy_resp = requests.get(TEACHER_FACULTIES_XML)
-    wydzialy_resp.encoding = "utf-8"
-    root_wydzialy = ET.fromstring(wydzialy_resp.text)
+    try:
+        wydzialy_resp = requests.get(TEACHER_FACULTIES_XML, timeout=20)
+        wydzialy_resp.encoding = "utf-8"
+        root_wydzialy = ET.fromstring(wydzialy_resp.text)
+    except Exception as e:
+        print(f"[BLAD] Nie udalo sie pobrac listy wydzialow: {e}")
+        return
 
     for item in [node for node in root_wydzialy.findall(".//ITEM") if node.find("ID") is not None]:
         wydzial_id = item.find("ID").text
         if not wydzial_id:
             continue
 
-        nauczyciele_resp = requests.get(TEACHER_FACULTY_XML_TEMPLATE.format(faculty_id=wydzial_id))
-        nauczyciele_resp.encoding = "utf-8"
-        teachers_xml = ET.fromstring(nauczyciele_resp.text)
+        try:
+            nauczyciele_resp = requests.get(TEACHER_FACULTY_XML_TEMPLATE.format(faculty_id=wydzial_id), timeout=20)
+            nauczyciele_resp.encoding = "utf-8"
+            teachers_xml = ET.fromstring(nauczyciele_resp.text)
 
-        payload = []
-        for teacher in teachers_xml.findall(".//ITEM"):
-            payload.append({
-                "name": teacher.findtext("NAME"),
-                "unit_name": teacher.findtext("JEDN"),
-                "external_id": teacher.findtext("ID"),
-                "email": teacher.findtext("E_MAIL"),
-            })
+            payload = []
+            for teacher in teachers_xml.findall(".//ITEM"):
+                payload.append({
+                    "nazwisko_imie": teacher.findtext("NAME"),
+                    "jednostka": teacher.findtext("JEDN"),
+                    "external_id": teacher.findtext("ID"),
+                    "email": teacher.findtext("E_MAIL"),
+                })
 
-        save_nauczyciele(payload)
+            if payload:
+                save_nauczyciele(payload)
+        except Exception as e:
+            print(f"[OSTRZEZENIE] Blad pobierania nauczycieli dla wydzialu {wydzial_id}: {e}")
+            continue
