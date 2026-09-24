@@ -28,7 +28,6 @@ def reset_database():
         ("grupy", "grupa_id"),
         ("nauczyciele", "external_id"),
         ("kierunki", "external_id"),
-        ("stan_semestru", "id")
     ]
     for table, pk in tables_pk:
         try:
@@ -62,6 +61,8 @@ def _run_xml_bootstrap() -> tuple[bool, str]:
 
     if semester_changed:
         print(f"!!! WYKRYTO ZMIANĘ SEMESTRU: {meta.current_semester_id} !!!")
+        print("Nowy semestr na UZ -> czyszczenie starych grup i planów z bazy...")
+        reset_database()
         return True, "semester_changed"
 
     return False, "no_change"
@@ -107,7 +108,8 @@ def main() -> None:
 
     mode = os.getenv("SCRAPER_ONLY", "").lower().strip()
 
-    if mode in MODE_FULL:
+    # Jeśli zmienna jest pusta (np. automatyczny cron) lub ustawiona na "full" -> zawsze rób pełny sync!
+    if not mode or mode in MODE_FULL:
         _run_full()
     elif mode in MODE_CATALOG:
         _run_catalog_only()
@@ -120,11 +122,8 @@ def main() -> None:
     elif mode in MODE_TEACHER_EVENTS:
         _run_teacher_events()
     else:
-        if mode:
-            print(f"Nieznany tryb SCRAPER_ONLY='{mode}' -> uruchamiam domyślną synchronizację katalogów")
-        else:
-            print("Brak zdefiniowanego trybu -> uruchamiam domyślną synchronizację katalogów")
-        _run_catalog_only()
+        print(f"Nieznany tryb SCRAPER_ONLY='{mode}' -> uruchamiam pełną synchronizację")
+        _run_full()
 
     duration = time.time() - start_time
     minutes = int(duration // 60)
