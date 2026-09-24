@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timezone
 from scraper.db import (
     save_semester_state,
     get_semester_state,
@@ -44,12 +45,33 @@ def _run_xml_bootstrap() -> tuple[bool, str]:
     print("TRYB: xml_bootstrap (Weryfikacja stanu semestru)")
     client = XmlClient()
 
-    # Pobieramy metadane z nagłówka XML
+    # Pobieramy metadane z nagłówka XML uczelni
     meta = client.fetch_semester_meta_from_file("grupy_lista_kierunkow.xml")
-
-    # Detekcja zmiany semestru (porównanie z poprzednim stanem przed nadpisaniem)
     prev_state = get_semester_state()
-    semester_changed = bool(prev_state and prev_state.get("id_semestru_aktualny") != meta.current_semester_id)
+
+    current_remote_id = str(meta.current_semester_id) if meta.current_semester_id else None
+    prev_saved_id = str(prev_state.get("id_semestru_aktualny")) if prev_state and prev_state.get("id_semestru_aktualny") else None
+
+    semester_changed = bool(prev_saved_id and prev_saved_id != current_remote_id)
+
+    if semester_changed:
+        print(f"🔔 Wykryto zmianę semestru na UZ: nowy ID={current_remote_id}, w bazie był ID={prev_saved_id}")
+        
+        # Sprawdzamy czy są jeszcze jakiekolwiek trwające/przyszłe zajęcia ze starego planu (np. sesja poprawkowa)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            res = supabase.table("zajecia_grupy").select("uid").gt("koniec", now_iso).limit(1).execute()
+            has_future_classes = bool(res.data)
+        except Exception as e:
+            print(f"Ostrzeżenie przy sprawdzaniu terminów zajęć: {e}")
+            has_future_classes = False
+
+        if not has_future_classes:
+            print("✅ Wszystkie zajęcia ze starego planu już się zakończyły.")
+            print("🧹 Bezpieczne czyszczenie bazy pod nowy semestr...")
+            reset_database()
+        else:
+            print("⏳ W starym planie trwają jeszcze zajęcia/sesja. Nie czyścimy bazy, dopisujemy nowy plan.")
 
     # Zapisujemy bieżący stan semestrów do bazy
     save_semester_state({
@@ -59,13 +81,7 @@ def _run_xml_bootstrap() -> tuple[bool, str]:
         "previous_semester_name": meta.previous_semester_name_pl
     })
 
-    if semester_changed:
-        print(f"!!! WYKRYTO ZMIANĘ SEMESTRU: {meta.current_semester_id} !!!")
-        print("Nowy semestr na UZ -> czyszczenie starych grup i planów z bazy...")
-        reset_database()
-        return True, "semester_changed"
-
-    return False, "no_change"
+    return semester_changed, "semester_changed" if semester_changed else "no_change"
 
 
 def _run_xml_sync() -> None:
@@ -104,11 +120,8 @@ def main() -> None:
     """Główny punkt wejścia: uruchamia wybrany etap synchronizacji."""
     start_time = time.time()
 
-    # reset_database()  # Odkoduj tę linię, jeśli chcesz wyczyścić bazę przed startem.
-
     mode = os.getenv("SCRAPER_ONLY", "").lower().strip()
 
-    # Jeśli zmienna jest pusta (np. automatyczny cron) lub ustawiona na "full" -> zawsze rób pełny sync!
     if not mode or mode in MODE_FULL:
         _run_full()
     elif mode in MODE_CATALOG:
