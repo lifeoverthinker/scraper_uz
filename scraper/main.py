@@ -21,24 +21,18 @@ MODE_TEACHER_EVENTS = {"teachers", "teacher_events", "nauczyciele"}
 
 
 def reset_database():
-    """Czyści tabele bazy danych przed synchronizacją (opcjonalnie)."""
+    """Czyści tabele bazy danych przed synchronizacją za pomocą szybkiej procedury TRUNCATE."""
     print("⚠️ CZYSZCZENIE BAZY DANYCH (Clean Start)...")
-    tables_pk = [
-        ("zajecia_grupy", "uid"),
-        ("zajecia_nauczyciela", "uid"),
-        ("grupy", "grupa_id"),
-        ("nauczyciele", "external_id"),
-        ("kierunki", "external_id"),
-    ]
-    for table, pk in tables_pk:
-        try:
-            if pk == "id":
-                supabase.table(table).delete().neq(pk, 0).execute()
-            else:
-                supabase.table(table).delete().neq(pk, "").execute()
-            print(f"  - Tabela '{table}' wyczyszczona.")
-        except Exception as e:
-            print(f"  - Błąd podczas czyszczenia '{table}': {e}")
+    try:
+        supabase.rpc("truncate_semester_tables", {}).execute()
+        print("  ✅ Baza danych wyczyszczona błyskawicznie (TRUNCATE CASCADE).")
+    except Exception as e:
+        print(f"  - Błąd rpc truncate: {e}, próba usuwania partiami...")
+        for table, pk in [("zajecia_grupy", "uid"), ("zajecia_nauczyciela", "uid"), ("grupy", "grupa_id"), ("nauczyciele", "external_id"), ("kierunki", "external_id")]:
+            try:
+                supabase.table(table).delete().neq(pk, "" if pk != "id" else 0).execute()
+            except Exception as inner_e:
+                print(f"    Błąd '{table}': {inner_e}")
 
 
 def _run_xml_bootstrap() -> tuple[bool, str]:
