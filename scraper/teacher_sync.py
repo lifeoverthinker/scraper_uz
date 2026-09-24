@@ -3,7 +3,7 @@ from scraper.xml_parsers import parse_teacher_plan_events
 from scraper.xml_client import XmlClient
 from bs4 import BeautifulSoup  # Zamieniliśmy ET na BeautifulSoup
 
-TEACHER_PLAN_SOURCES = ["nauczyciel_plan", "nauczyciel_hplan"]
+TEACHER_PLAN_SOURCES = ["nauczyciel_plan"]
 
 
 def sync_teacher_events_and_meta(verbose=True):
