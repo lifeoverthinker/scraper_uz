@@ -3,7 +3,7 @@ from scraper.db import supabase, save_zajecia_grupy
 from scraper.xml_client import XmlClient
 from scraper.xml_parsers import parse_group_plan_events
 
-GROUP_PLAN_SOURCES = ["grupy_plan", "grupy_hplan"]
+GROUP_PLAN_SOURCES = ["grupy_plan"]
 
 
 def main():
