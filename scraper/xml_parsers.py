@@ -128,9 +128,19 @@ def _parse_plan_events(xml_content: str, source_url: Optional[str] = None) -> li
             return f.get_text(strip=True) if f and f.text else None
 
         sort_val = get_txt("SORT")
-        # W planie grupy SORT to nazwisko prowadzacego, w planie nauczyciela SORT to kody grup
-        teacher = _format_teacher_name(sort_val) if (source_url and "grupy" in source_url or not source_url) else None
         groups_label = sort_val
+        teacher = None
+
+        # 1. Najpierw sprawdź oficjalną listę z tagu <NAUCZ> (obsługuje wielu prowadzących)
+        naucz_node = it.find("NAUCZ")
+        if naucz_node:
+            t_names = [n.get_text(strip=True) for n in naucz_node.find_all("NAME") if n.get_text(strip=True)]
+            if t_names:
+                teacher = ", ".join(t_names)
+
+        # 2. Jeśli brak tagu <NAUCZ>, użyj wartości zapasowej z SORT
+        if not teacher:
+            teacher = _format_teacher_name(sort_val) if (source_url and "grupy" in source_url or not source_url) else None
 
         subgroup = get_txt("PG")
         semester_id = get_txt("ID_SEMESTR") or header_semester_id
