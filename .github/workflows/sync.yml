@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 45
     env:
       PYTHONUNBUFFERED: "1"
-      SCRAPER_ONLY: ${{ inputs.run_mode || 'full' }}
+      SCRAPER_ONLY: ${{ github.event.inputs.run_mode || 'full' }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Python
